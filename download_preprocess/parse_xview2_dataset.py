@@ -3,7 +3,7 @@ parse_xview2_dataset.py
 ====================
 Usage: parsing individual building polygon information from xBD files.
 
-Usage:
+Call via:
     python precompute_static.py
 """
 
