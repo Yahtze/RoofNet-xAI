@@ -13,10 +13,10 @@ import pandas as pd
 # === CONFIGURATION AND API SETUP ===
 
 # Load Google Maps Static API key from a local text file
-API_KEY = "" # <-- Insert your API key generated from 
+API_KEY = "" # <-- Insert your API key generated from https://developers.google.com/maps/documentation/maps-static/get-api-key
 
 # Input CSV containing the target filenames and their corresponding geographic coordinates
-CSV_FILE = "roofnet_download_queue_deduped.csv" 
+CSV_FILE = "" # <-- Insert your CSV file path containing building coordinates 
 
 # Output directory where the downloaded satellite images will be stored
 OUT_DIR = "roofnet_redownloaded" 
