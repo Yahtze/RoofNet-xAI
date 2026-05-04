@@ -32,25 +32,28 @@
 #
 # You should have received a copy of the BSD 3-Clause License along with
 # BRAILS. If not, see <http://www.opensource.org/licenses/>.
-#
-# Contributors:
-# Brian Wang
 
-# minor minor mods: fmk
+# Major modifications made by RoofNet development team to below script.
+# Above copyright attribute kept for traceability of code.
 
-from brails.types.image_set import ImageSet
-from brails.filters.filter import Filter
-
+import os
 import torch
 import numpy as np
-import os
 from PIL import Image
-
-from pathlib import Path
-from transformers import AutoModelForMaskGeneration, AutoProcessor, pipeline
+from transformers import pipeline
 from dataclasses import dataclass
 from typing import List, Optional, Dict, Any
-import supervision as sv
+from glob import glob
+
+# === CONFIGURATION ===
+INPUT_DIR = "roofnet_gsat_imagery" # <-- Insert path to your imagery to be cropped
+OUTPUT_DIR = "roofnet_gsat_imagery_cropped" # <-- Insert path to where cropped imagery should be saved
+
+TEXT_PROMPT = "single building in middle of image without occlusion."
+BOX_THRESHOLD = 0.25
+DETECTOR_ID = "IDEA-Research/grounding-dino-tiny"
+
+# === DATA CLASSES ===
 
 @dataclass
 class FilterRoofBoundingBox:
@@ -62,7 +65,6 @@ class FilterRoofBoundingBox:
     @property
     def xyxy(self) -> List[float]:
         return [self.xmin, self.ymin, self.xmax, self.ymax]
-
 
 @dataclass
 class FilterRoofDetectionResult:
@@ -80,167 +82,93 @@ class FilterRoofDetectionResult:
                                    xmax=detection_dict['box']['xmax'],
                                    ymax=detection_dict['box']['ymax']))
 
-def detect(image: Image.Image, labels: List[str], threshold: float = 0.3,
-           detector_id: Optional[str] = None) -> List[Dict[str, Any]]:
+# === CORE DETECTION LOGIC ===
+
+def detect(image: Image.Image, object_detector, labels: List[str], threshold: float = 0.3) -> List[FilterRoofDetectionResult]:
     """
     Use Grounding DINO to detect a set of labels in an image in a zero-shot fashion.
+    Accepts the pre-loaded object_detector pipeline.
     """
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    detector_id = detector_id if detector_id is not None else "IDEA-Research/grounding-dino-tiny"
-    object_detector = pipeline(
-        model=detector_id, task="zero-shot-object-detection", device=device)
+    # Ensure labels end with a period for DINO
+    labels = [label if label.endswith(".") else label+"." for label in labels]
 
-    labels = [label if label.endswith(
-        ".") else label+"." for label in labels]
-
-    results = object_detector(
-        image,  candidate_labels=labels, threshold=threshold)
+    results = object_detector(image, candidate_labels=labels, threshold=threshold)
     results = [FilterRoofDetectionResult.from_dict(result) for result in results]
 
     return results
 
-
-
-class RoofView(Filter):
-
-
-  def __init__(self, input_data: dict):
+def process_and_crop_image(image_path: str, output_dir: str, object_detector):
+    """
+    Detects the building, extracts the largest bounding box, applies padding, 
+    and saves the cropped image using the pre-loaded model.
+    """
+    img_name = os.path.basename(image_path)
     
-    self.text_prompt = "single building in middle of image without occlusion"
-    self.box_treshhold = 0.25
-    self.text_treshhold = 0.25
+    try:
+        img = Image.open(image_path).convert("RGB")
+    except Exception as e:
+        print(f"Error loading {img_name}: {e}")
+        return False
 
-
-  def _bound_one_image(self, IMAGE_PATH, TEXT_PROMPT, BOX_TRESHOLD, TEXT_TRESHOLD, model, device):    
-    '''
-      Performs cropping of target house on one image(not sure which function can better restructure into pipeline)
-      '''
-
-    # detect objects
-    image = Image.open(IMAGE_PATH)
-    detections_raw = detect(image, [TEXT_PROMPT], BOX_TRESHOLD, None)
-    xyxy = []
-    confidence = []
-    class_ids = []
-    labels = []
-    for det in detections_raw:
-        xyxy.append(det.box.xyxy)
-        confidence.append(det.score)
-        labels.append(det.label[:-1])
-    detections = sv.Detections.empty()
-    detections.xyxy = np.array(xyxy, dtype=np.float32)
-    detections.confidence = np.array(confidence, dtype=np.float32)
-
-    tgt = {
-      "img_name": IMAGE_PATH.split('/')[-1],
-      "img_source":Image.open(IMAGE_PATH),
-      "boxes": torch.Tensor(xyxy),
-      "labels": labels
-    }
-    return tgt
-
-  def _crop_and_save_img(self, tgt, output_dir, random = False, 
-    buildingheight = 'NA', numstories = 'NA', roofshape = 'NA', fparea = 'NA'
-  ):   
-    '''
-      Given cropping information from bound_one_image, perform cropping and save cropped image
-      Inputs
-      - tgt: dictionary from bound_one_image, that stores img-related info and bounding boxes of houses
-      - output_dir: target folder to save image
-      '''
-    
-    boxes, labels = tgt["boxes"], tgt["labels"]
-    img_name, img = tgt['img_name'], tgt['img_source']
-    new_name = f"height{buildingheight}_numstories{numstories}_roofshape{roofshape}_fpArea{fparea}_{img_name}"
-    img_name = new_name
     W, H = img.size
-    
-    assert len(boxes) == len(labels), "boxes and labels must have same length"
-    if(len(boxes) == 0): #no boxes because boxes_logits < threshold
-      print(f'{img_name} has no boxes')
-      return False, (img_name, len(boxes))
-    
-    # draw boxes and masks
-    if(len(boxes) > 1 and not random):
-      box_areas = [(box[2]-box[0]) * (box[3]-box[1]) for box in boxes] #choose the house with largest foreground area
-      box_idx = np.argmax(box_areas)
+
+    # Pass the pre-loaded detector into the detect function
+    detections = detect(img, object_detector, [TEXT_PROMPT], threshold=BOX_THRESHOLD)
+
+    if len(detections) == 0:
+        print(f"Skipping {img_name}: No building detected above threshold.")
+        return False
+
+    # Extract boxes
+    boxes = [det.box.xyxy for det in detections]
+
+    if len(boxes) > 1:
+        box_areas = [(box[2]-box[0]) * (box[3]-box[1]) for box in boxes]
+        box_idx = np.argmax(box_areas)
     else:
-      box_idx = np.random.randint(len(boxes))
-      
-    box, label = boxes[box_idx], labels[box_idx]
-    # from 0..1 to 0..W, 0..H
-    # box = box * torch.Tensor([W, H, W, H])
-    # # from xywh to xyxy
-    # box[:2] -= box[2:] / 2 #box center = (box[0] + w/2, box[1] + h/2)
-    # box[2:] += box[:2] #bot_right = (x0 + w, y0 + h)
-    # draw
-    x0, y0, x1, y1 = box
-    x0, y0, x1, y1 = int(x0), int(y0), int(x1), int(y1)
+        box_idx = 0
+
+    box = boxes[box_idx]
     
-    #get more background for house
+    x0, y0, x1, y1 = int(box[0]), int(box[1]), int(box[2]), int(box[3])
+    
+    # Apply padding
     x0, y0 = max(1, x0-40), max(1, y0-40)
     x1, y1 = min(W-1, x1+40), min(H-1, y1+40)
     
     crop = img.crop((x0, y0, x1, y1))
     crop.save(os.path.join(output_dir, img_name), 'PNG')
-      
-    return True, (img_name, len(boxes))
-
-  def filter1(self, image_path,  output_dir):
     
-    model = load_model(self.CONFIG_PATH, self.WEIGHTS_PATH)
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-    crop_dict = self._bound_one_image(image_path, self.text_prompt, self.box_treshhold, self.text_treshhold, model, device)
-    self._crop_and_save_img(crop_dict, output_dir, random = False)
+    return True
 
-  def filter(self, input_images: ImageSet,  output_dir: str, inventory):
+# === MAIN EXECUTION ===
 
+if __name__ == "__main__":
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    def isImage(im):
-      return im.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))
+    image_files = glob(os.path.join(INPUT_DIR, "*.*"))
+    image_files = [f for f in image_files if f.lower().endswith(('.png', '.jpg', '.jpeg'))]
     
-    #
-    # ensure consistance in dir_path, i.e remove ending / if given and make directory
-    #
+    print(f"Found {len(image_files)} images in '{INPUT_DIR}'.")
+    print("Loading Grounding DINO model into memory (this happens only once)...")
     
-    dir_path = Path(output_dir)
-    os.makedirs(f'{dir_path}',exist_ok=True)
-
-    #
-    # filter and create image set
-    #
-
-    device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+    # 1. Determine the best available hardware
+    device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    output_images = ImageSet()
-    output_images.dir_path = dir_path    
-
-    input_dir = input_images.dir_path
-    for key, im in input_images.images.items():
-      print(key,im)
-      if isImage(im.filename):
-          
-        image = os.path.join(input_dir, im.filename)
-        print(image)        
+    # 2. Load the model weights into RAM/VRAM just ONE time
+    global_detector = pipeline(
+        model=DETECTOR_ID, 
+        task="zero-shot-object-detection", 
+        device=device
+    )
+    print(f"Model loaded successfully on device: {device}\n")
+    
+    success_count = 0
+    for i, img_path in enumerate(image_files):
+        print(f"Processing {i+1}/{len(image_files)}: {os.path.basename(img_path)}...")
         
-        # eventually do in parallel
-        #batch_images.append(image)
-        #batch_keys.append(key)
-        #batch_features.append(im.features)
-        crop_dict = self._bound_one_image(image, self.text_prompt, self.box_treshhold, self.text_treshhold, model = None, device = device)
-        building_features = inventory.inventory[key].features
-        breakpoint()
-        success, (img_name, bboxes) = self._crop_and_save_img(
-           
-          crop_dict, output_dir, random = False, 
-          buildingheight = building_features['buildingheight'], 
-          numstories = building_features['numstories'],
-          roofshape = building_features['roofshape'],
-          fparea = building_features['fpAreas'] #footprint is x square meters
-        )
-        output_images.add_image(key, img_name, im.properties)
-
-    return output_images
-
-      
-
+        # 3. Pass the loaded model to the processing function
+        if process_and_crop_image(img_path, OUTPUT_DIR, global_detector):
+            success_count += 1
+            
+    print(f"\n✅ Done! Successfully cropped {success_count} out of {len(image_files)} images.")

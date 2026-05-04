@@ -1,7 +1,14 @@
+"""
+GOAL: Generate metadata CSV for RoofNet images with additional information 
+from a CSV file containing city, continent, and coordinates (look in resources).
+This script will read the images from the specified dataset directory, extract 
+metadata from filenames, and save it to a CSV file.
 
-# GOAL: Generate metadata CSV for RoofNet images with additional information from a CSV file containing city, continent, and coordinates (look in resources).
-# This script will read the images from the specified dataset directory, extract metadata from filenames, and save it to a CSV file.
-# Run example: python generate_roof_material_metadata.py --dataset_dir <RoofNet_dataset_dir> --city_csv <city_coordinates_csv>
+Call via: 
+    python generate_roof_material_metadata.py --dataset_dir <RoofNet_dataset_dir> 
+    --city_csv <city_coordinates_csv>
+"""
+
 import os
 import argparse
 import shutil

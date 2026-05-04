@@ -1,8 +1,16 @@
-# Description:
-# This script automates the re-downloading of satellite imagery for the RoofNet dataset
-# using the Google Maps Static API. It processes a queue of coordinates from a CSV file,
-# handles HTTP request retries with exponential backoff, and logs failed downloads 
-# for later troubleshooting.
+"""
+Description:
+This script automates the re-downloading of satellite imagery for the RoofNet dataset
+using the Google Maps Static API. It processes a queue of coordinates from a CSV file,
+handles HTTP request retries with exponential backoff, and logs failed downloads 
+for later troubleshooting. If you have already downloaded images in tandem with
+sampling polygons, as shown in sample_osm_polygons_gsat_imagery.ipynb, this script
+will be largely redundant. It is meant for use in the case of having CSV information
+only (i.e. no imagery).
+
+Call via: 
+    python download_from_csv.py
+"""
 
 import os
 import time
@@ -15,7 +23,7 @@ import pandas as pd
 API_KEY = "" # <-- Insert your API key generated from https://developers.google.com/maps/documentation/maps-static/get-api-key
 
 # Input CSV containing the target filenames and their corresponding geographic coordinates
-CSV_FILE = "" # <-- Insert your CSV file path containing building coordinates 
+CSV_FILE = "test_add_cities.csv" # <-- Insert your CSV file path containing building coordinates 
 
 # Output directory where the downloaded satellite images will be stored
 OUT_DIR = "roofnet_gsat_imagery" 
@@ -125,7 +133,7 @@ for i, row in df.iterrows():
         })
 
     # Display processing progress every 100 images
-    if i % 100 == 0: 
+    if i % 10 == 0: 
         print(f"Processed {i}/{len(df)}")
 
     # Short delay to prevent overwhelming the API or exceeding rate limits
