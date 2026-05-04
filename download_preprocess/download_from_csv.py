@@ -5,7 +5,6 @@
 # for later troubleshooting.
 
 import os
-import csv
 import time
 import requests
 import pandas as pd
@@ -19,7 +18,7 @@ API_KEY = "" # <-- Insert your API key generated from https://developers.google.
 CSV_FILE = "" # <-- Insert your CSV file path containing building coordinates 
 
 # Output directory where the downloaded satellite images will be stored
-OUT_DIR = "roofnet_redownloaded" 
+OUT_DIR = "roofnet_gsat_imagery" 
 
 # CSV file to record metadata for any downloads that fail after multiple attempts
 FAILED_CSV = "failed_downloads.csv" 

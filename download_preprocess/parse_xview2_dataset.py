@@ -7,6 +7,17 @@ Call via:
     python parse_xview2_dataset.py
 """
 
+import os
+import json
+import rasterio
+from rasterio import features
+from shapely import shapely_transform, wkt
+from pyproj import Transformer
+import numpy as np
+import glob
+from PIL import Image
+
+
 # --- Directory Configuration ---
 ROOT = './'  # Root directory path for data processing
 LABELS_DIR = os.path.join(ROOT, "labels")
