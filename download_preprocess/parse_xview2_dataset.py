@@ -11,20 +11,21 @@ import os
 import json
 import rasterio
 from rasterio import features
-from shapely import shapely_transform, wkt
+from shapely import wkt
+from shapely.ops import transform as shapely_transform
 from pyproj import Transformer
 import numpy as np
-import glob
+from glob import glob
 from PIL import Image
 
 
 # --- Directory Configuration ---
-ROOT = './'  # Root directory path for data processing
-LABELS_DIR = os.path.join(ROOT, "labels")
-IMAGES_DIR = os.path.join(ROOT, "images")      # Source directory for xBD .tif images
-IMAGES_PNG_DIR = os.path.join(ROOT, "images_png")
-CROPS_DIR = os.path.join(ROOT, "crops")
-MASKS_DIR = os.path.join(ROOT, "masks")
+XBD_DIR = ''  # Root directory path to xBD download for data processing
+LABELS_DIR = os.path.join(XBD_DIR, "labels")
+IMAGES_DIR = os.path.join(XBD_DIR, "images")      # Source directory for xBD .tif images
+IMAGES_PNG_DIR = os.path.join(XBD_DIR, "images_png")
+CROPS_DIR = os.path.join(XBD_DIR, "crops")
+MASKS_DIR = os.path.join(XBD_DIR, "masks")
 
 # Initialize output directory structure
 os.makedirs(IMAGES_PNG_DIR, exist_ok=True)
