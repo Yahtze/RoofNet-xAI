@@ -1,10 +1,6 @@
 """
 run_batch_experiments.py
 =======================
-Last Edited: 23 April 2026
-DECLARATION OF GENERATIVE AI USE:
-This code was prepared with assistance from Claude Sonnet 4.6.
-=======================
 Orchestrates the full 400-run experiment loop:
 
     4 modes  ×  100 random seeds  =  400 OpenQuake scenario_damage runs

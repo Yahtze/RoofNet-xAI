@@ -1,10 +1,6 @@
 """
 precompute_static.py
 =======================
-Last Edited: 23 April 2026
-DECLARATION OF GENERATIVE AI USE:
-This code was prepared with assistance from Claude Sonnet 4.6.
-=======================
 Run ONCE before the 400-run batch.
 
 Covers every computation in build_exposure_model.py that is:

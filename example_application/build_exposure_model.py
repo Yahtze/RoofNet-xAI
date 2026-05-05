@@ -1,10 +1,6 @@
 """
 build_exposure_model.py
 =======================
-Last Edited: 23 April 2026
-DECLARATION OF GENERATIVE AI USE:
-This code was prepared with assistance from Claude Sonnet 4.6.
-=======================
 Run modes:
     python build_exposure_model.py roofnet    ← uses RoofNet roof material
     python build_exposure_model.py benchmark  ← ignores roof material entirely
