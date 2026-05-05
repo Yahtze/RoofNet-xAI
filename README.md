@@ -1,8 +1,8 @@
 # RoofNet (v1.0)
 
-This work is licensed under a [Creative Commons Attribution-NonCommercial 4.0 International License][cc-by-nc].
+This work is licensed under a [Creative Commons Attribution 4.0 International License][cc-by].
 
-[cc-by-nc]: https://creativecommons.org/licenses/by-nc/4.0/
+[cc-by]: https://creativecommons.org/licenses/by/4.0/
 
 ## Overview 
 RoofNet is the largest and most geographically diverse dataset for global roof material classification. It consists of high-resolution Earth Observation (EO) image records with structured metadata and curated textual prompts describing roofing characteristics across 14 material classes and an "Unknown" class. The dataset is designed to support hazard preparedness, resilience planning, and post-disaster supply-chain analysis.
