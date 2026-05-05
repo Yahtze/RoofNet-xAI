@@ -9,7 +9,7 @@ RoofNet is the largest and most geographically diverse dataset for global roof m
 
 RoofNet includes:
 
-- 49,662 building records spanning 162 urban regions across 103 countries, with rich per-sample metadata (e.g., building height, roof shape, solar panel presence). (See our [Kaggle page](https://www.kaggle.com/datasets/doubleblindreview/xbd-roof-images) for imagery and the "resources" folder for the metadata CSV.)
+- 49,662 building records spanning across 101 countries, with rich per-sample metadata (e.g., building height, roof shape, solar panel presence). (See our [Kaggle page](https://www.kaggle.com/datasets/doubleblindreview/xbd-roof-images) for imagery and the "resources" folder for the metadata CSV.)
     - We also share the necessary code to reproduce the entire EO imagery dataset in the "download_preprocess" folder, including the code to fetch Google Satellite imagery ("download_from_csv.py"), parse xBD imagery ("parse_xview2_dataset.py"), and crop all fetched imagery ("roof_view.py").
 
 - 14 roof material classes (see below).
