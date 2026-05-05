@@ -1,204 +1,275 @@
 """
-GOAL: Generate metadata CSV for RoofNet images with additional information 
-from a CSV file containing city, continent, and coordinates (look in resources).
-This script will read the images from the specified dataset directory, extract 
-metadata from filenames, and save it to a CSV file.
+GOAL: Generate metadata CSV for RoofNet images by merging physical image files 
+with an existing CSV containing per-building latitude, longitude, and other metadata.
 
 Call via: 
     python generate_roof_material_metadata.py --dataset_dir <RoofNet_dataset_dir> 
-    --city_csv <city_coordinates_csv>
+    --building_csv <building_coordinates_csv>
 """
 
 import os
 import argparse
-import shutil
+import time
 from pathlib import Path
 import pandas as pd
-import re
-from math import radians, cos, sin, asin, sqrt
 import numpy as np
+import osmnx as ox
+from tqdm import tqdm
 
-# === GEOSPATIAL UTILITIES ===
+# Configure OSMnx to prevent excessive logging and timeout gracefully
+ox.settings.log_console = False
+ox.settings.timeout = 15
 
-def haversine(lat1, lon1, lat2, lon2):
-    """
-    Calculates the great-circle distance between two points on the Earth 
-    surface using the Haversine formula. Units are in miles.
-    """
-    lat1, lon1, lat2, lon2 = float(lat1), float(lon1), float(lat2), float(lon2)
-    R = 3958.8  # Earth radius in miles
-    dlat = radians(lat2 - lat1)
-    dlon = radians(lon2 - lon1)
-    a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
-    return 2 * R * asin(sqrt(a))
+# === OSM ATTRIBUTE EXTRACTION ===
+import pandas as pd
+import geopandas as gpd
+import osmnx as ox
+from shapely.geometry import Point
+import numpy as np
+import time
 
-def normalize_city(city):
+def batch_extract_osm_metadata(df_metadata):
     """
-    Standardizes city names for use as dictionary keys by lowercasing,
-    removing punctuation, and replacing spaces with underscores.
+    Takes a dataframe with latitude/longitude and performs a local spatial join
+    against bulk-downloaded OSM data to prevent API throttling.
     """
-    if pd.isna(city):
-        return "unknown"
-    return city.lower().replace(",", "").replace(" ", "_")
+    print("Converting coordinates to spatial geometries...")
+    # 1. Convert your Pandas DataFrame to a GeoDataFrame
+    geometry = [Point(xy) for xy in zip(df_metadata['longitude'], df_metadata['latitude'])]
+    gdf_points = gpd.GeoDataFrame(df_metadata, geometry=geometry, crs="EPSG:4326")
+    
+    # Create empty columns for our results
+    gdf_points['height'] = np.nan
+    gdf_points['numstories'] = np.nan
+    gdf_points['fpArea'] = np.nan
+    gdf_points['roofshape'] = pd.Series(np.nan, index=gdf_points.index, dtype=object)
+
+    
+    # 2. Group your data geographically. 
+    # If you have a 'City' column, group by that. If not, we can cluster or just 
+    # use the bounding box of the whole dataset (if it's not a massive global spread).
+    # Assuming 'City' is in your CSV from the download script:
+    
+    if 'city' not in gdf_points.columns:
+        # Fallback: Treat all points as one region (Dangerous if points span the globe)
+        groups = [("All Data", gdf_points)]
+    else:
+        groups = gdf_points.groupby('city')
+
+    for group_name, group in groups:
+        print(f"\nProcessing batch for group: {group_name} ({len(group)} buildings)")
+        
+        # total_bounds returns (minx, miny, maxx, maxy) -> (West, South, East, North)
+        west, south, east, north = group.total_bounds
+        
+        # Buffer to catch edge buildings (~100m)
+        buffer = 0.001 
+        
+        try:
+            print("  -> Downloading bulk OSM buildings for bounding box...")
+            
+            # --- CORRECT OSMnx v2.0+ SYNTAX ---
+            # Order MUST be: (Left, Bottom, Right, Top) -> (West, South, East, North)
+            bbox = (west - buffer, south - buffer, east + buffer, north + buffer)
+            
+            buildings = ox.features_from_bbox(bbox=bbox, tags={'building': True})
+            
+            # Filter for polygons
+            buildings = buildings[buildings.geometry.type.isin(['Polygon', 'MultiPolygon'])]
+            
+            if buildings.empty:
+                print("  -> No buildings found in OSM for this area.")
+                continue
+                
+            # Project to UTM to calculate area in square meters
+            buildings_proj = ox.projection.project_gdf(buildings)
+            buildings['fpArea'] = buildings_proj.geometry.area
+            
+            print("  -> Performing local spatial join...")
+            joined = gpd.sjoin(group, buildings, how="left", predicate="intersects")
+                        
+            # Map the data back to your original GeoDataFrame
+            for idx, row in joined.iterrows():
+                if pd.notna(row.get('index_right')): # If a building matched
+                    
+                    # Map Height
+                    if 'height' in row and pd.notna(row['height']):
+                        try:
+                            h_str = str(row['height']).lower().replace('m', '').strip()
+                            gdf_points.at[idx, 'height'] = float(h_str)
+                        except ValueError:
+                            pass
+                            
+                    # Map Stories
+                    if 'building:levels' in row and pd.notna(row['building:levels']):
+                        try:
+                            gdf_points.at[idx, 'numstories'] = float(row['building:levels'])
+                        except ValueError:
+                            pass
+                            
+                    # Map Roofshape
+                    if 'roof:shape' in row and pd.notna(row['roof:shape']):
+                        gdf_points.at[idx, 'roofshape'] = str(row['roof:shape'])
+                        
+                    # Map Area
+                    if 'fpArea' in row and pd.notna(row['fpArea']):
+                        gdf_points.at[idx, 'fpArea'] = row['fpArea']
+                        
+        except Exception as e:
+            print(f"  -> Skipped {group_name} due to API/Data error: {e}")
+            
+        # Small sleep between bulk city queries, NOT per building
+        time.sleep(2) 
+
+    # Drop the geometry column so it can be saved back to a standard CSV
+    return pd.DataFrame(gdf_points.drop(columns=['geometry']))
+
+def extract_structural_attributes(lat, lon, dist=25):
+    """
+    Query OSM around a specific lat/lon to extract structural parameters.
+    Returns height, numstories, roofshape, and fpArea (in square meters).
+    """
+    height = numstories = roofshape = fpArea = np.nan
+    
+    if pd.isna(lat) or pd.isna(lon):
+        return height, numstories, roofshape, fpArea
+        
+    try:
+        # Query OSM for buildings within a small search radius of the point
+        gdf = ox.features_from_point((lat, lon), tags={'building': True}, dist=dist)
+        
+        # Filter for valid geometries
+        gdf = gdf[gdf.geometry.type.isin(['Polygon', 'MultiPolygon'])]
+        
+        if not gdf.empty:
+            # Use the first matched building
+            building = gdf.iloc[0]
+            
+            # 1. Footprint Area
+            # Project geometry to local UTM to calculate accurate area in square meters
+            gdf_proj = ox.projection.project_gdf(gdf)
+            fpArea = gdf_proj.iloc[0].geometry.area
+            
+            # 2. Roof Shape
+            if 'roof:shape' in building and pd.notna(building['roof:shape']):
+                roofshape = str(building['roof:shape'])
+                
+            # 3. Number of Stories (OSM tag: 'building:levels')
+            if 'building:levels' in building and pd.notna(building['building:levels']):
+                try:
+                    numstories = float(building['building:levels'])
+                except ValueError:
+                    pass
+                    
+            # 4. Height
+            if 'height' in building and pd.notna(building['height']):
+                try:
+                    # Clean strings like "10.5 m" or "10.5m"
+                    h_str = str(building['height']).lower().replace('m', '').strip()
+                    height = float(h_str)
+                except ValueError:
+                    pass
+            
+            # Fallback Estimate: If height is missing but stories exist, estimate ~3m per story
+            if pd.isna(height) and pd.notna(numstories):
+                height = numstories * 3.0
+                
+    except Exception:
+        # Fails silently for timeouts, no data found, or network errors
+        pass
+        
+    return height, numstories, roofshape, fpArea
 
 # === MAIN PROCESSING LOGIC ===
 
-def main(base_dir, csv_path):
-    """
-    Main execution function to walk through the dataset, parse filenames,
-    calculate spatial proximities, and output a consolidated CSV.
-    """
-    # Load and index reference city data
-    df = pd.read_csv(csv_path, encoding='latin1')
-    df['city_key'] = df['City'].apply(normalize_city)
-    city_to_continent = dict(zip(df['city_key'], df['Continent']))
-    city_to_coords = dict(zip(df['city_key'], zip(df['Latitude'], df['Longitude'])))
-
-    # Dataset structure parameters
-    splits = ["train", "val"]
-    material_folders = [
-        'PolycarbonateSheetMaterials', 'AmorphousAsphalt', 'AmorphousConcrete', 'AmorphousFabric',
-        'AmorphousMembrane', 'AsphaltTiles', 'ClayTiles', 'ConcreteTiles', 'GlassSheetMaterials',
-        'GreenVegetative', 'MetalSheetMaterials', 'StoneSlates', 'Thatch', 'WoodTiles', 'Unknown'
-    ]
-
+def main(base_dir, building_csv_path):
+    # 1. Load the per-building CSV
+    print(f"Loading building metadata from {building_csv_path}...")
+    df_metadata = pd.read_csv(building_csv_path)
+    
+    if 'filename' not in df_metadata.columns:
+        raise ValueError("The provided building CSV must contain a 'filename' column.")
+        
+    # 2. Gather all images from the dataset directory recursively
+    print(f"Scanning for images recursively in {base_dir}...")
+    base_path = Path(base_dir)
+    image_paths = [p for ext in ("*.jpg", "*.jpeg", "*.png") for p in base_path.rglob(ext)]
+    
     records = []
-    count = 0
+    for img_path in image_paths:
+        split = "train" if "train" in img_path.parts else ("val" if "val" in img_path.parts else "unknown")
+        records.append({
+            "filename": img_path.name,
+            "split": split,
+        })
+        
+    df_images = pd.DataFrame(records)
+    if df_images.empty:
+        print("No images found in the specified directory. Exiting.")
+        return
 
-    # Iterate through split subfolders (train/val) and material categories
-    for split in splits:
-        parent_dir = os.path.join(base_dir, split)
-        for folder in material_folders:
-            folder_path = Path(parent_dir) / folder
-            if not folder_path.exists():
-                print(f"⚠️ Folder not found: {folder_path}")
-                continue
+    # 3. Merge physical image files with coordinate data FIRST
+    print("Merging image data with building coordinates...")
+    output_df = pd.merge(df_images, df_metadata, on="filename", how="left")
+    
+    # 4. Bulk Query OSM using Spatial Joins
+    print("Querying OSM via Spatial Join (Batch Mode)...")
+    output_df = batch_extract_osm_metadata(output_df)
+    
+    # Initialize the columns
+    output_df['height'] = np.nan
+    output_df['numstories'] = np.nan
+    output_df['fpArea'] = np.nan
+    output_df['roofshape'] = pd.Series(np.nan, index=output_df.index, dtype=object)
 
-            # Gather all image files in the current category
-            image_paths = [p for ext in ("*.jpg", "*.jpeg", "*.png") for p in folder_path.glob(ext)]
-            for image_path in image_paths:
-                filename = image_path.name
-                
-                # --- Step 1: Identify City Key from Filename ---
-                # Attempt to parse city name based on common filename suffixes
-                if len(image_path.stem.split("_height")) > 1:
-                    city_key_raw = image_path.stem.split("_height")[0]
-                elif len(image_path.stem.split("_imsat")) > 1:
-                    city_key_raw = image_path.stem.split("_imsat")[0]
-                else:
-                    city_key_raw = image_path.stem.split("-")[0]
-                city_key = city_key_raw.lower()
+    # Use tqdm to show a progress bar
+    for idx, row in tqdm(output_df.iterrows(), total=len(output_df)):
+        lat = row.get('latitude')
+        lon = row.get('longitude')
+        
+        # We only query OSM if we have valid coordinates
+        if pd.notna(lat) and pd.notna(lon):
+            h, s, r, a = extract_structural_attributes(lat, lon)
+            
+            output_df.at[idx, 'height'] = h
+            output_df.at[idx, 'numstories'] = s
+            output_df.at[idx, 'roofshape'] = r
+            output_df.at[idx, 'fpArea'] = a
+            
+            # CRITICAL: Sleep to prevent Overpass API from blocking your IP
+            time.sleep(1.0) 
 
-                # --- Step 2: Coordinate Extraction and Validation ---
-                # Parse embedded latitude/longitude if 'imsat' pattern is found
-                if 'imsat_' in image_path.stem:
-                    latlong_str = image_path.stem.split('imsat_')[-1].split('_')[0]
-                    # Regex handles varying precision and potential coordinate concatenation
-                    match = re.match(r"(-?\d+\.\d{1,7})(-?\d+\.\d+)", latlong_str)
-                    if not match or '-' in match.group(2):
-                        match = re.match(r"(-?\d+\.\d{1,8})(-?\d+\.\d+)", latlong_str)
-                    elif float(match.group(2)) > 180:
-                        match = re.match(r"(-?\d+\.\d{1,8})(-?\d+\.\d+)", latlong_str)
-
-                    if match:
-                        lat, lon = float(match.group(1)), float(match.group(2))
-                        
-                        # --- Step 3: Spatial Proximity (Haversine) Check ---
-                        # Find the closest city from the CSV based on image coordinates
-                        closest_city, closest_dist = None, float("inf")
-                        for row in df.itertuples():
-                            city_lat, city_lon = row.Latitude, row.Longitude
-                            dist = haversine(lat, lon, city_lat, city_lon)
-                            if dist < closest_dist:
-                                closest_dist = dist
-                                closest_city = row.city_key
-                                closest_lat, closest_lon = city_lat, city_lon
-                        
-                        # If image is >150 miles from its named city, use the nearest spatial match
-                        if closest_dist > 150:
-                            if city_key in city_to_coords:
-                                lat, lon = city_to_coords[city_key]
-                            else:
-                                lat, lon = closest_lat, closest_lon
-                                city_key = closest_city
-                                print(f"No city match in filename. Using closest city: {closest_city} ({closest_dist:.1f} mi)")
-                    else:
-                        print(f"Failed to parse lat/lon from filename: {image_path}")
-                        continue
-                else:
-                    # Fallback to coordinates from CSV if not embedded in filename
-                    if city_key in city_to_coords:
-                        lat, lon = city_to_coords[city_key]
-                    else:
-                        print(f"No lat/lon found for city '{city_key}' in CSV for file: {image_path}")
-                        continue
-
-                # --- Step 4: Attribute and Building Metadata Extraction ---
-                material_label = folder
-                continent = city_to_continent.get(city_key, "Unknown")
-                
-                # Extract structural parameters (height, area, etc.) from underscore-delimited parts
-                height = numstories = roofshape = fpArea = np.nan
-                parts = filename.replace(".jpg", "").split("_")
-                for part in parts:
-                    if part.startswith("height"):
-                        val = part.replace("height", "")
-                        height = float(val) if val != "NA" else np.nan
-                    elif part.startswith("numstories"):
-                        val = part.replace("numstories", "")
-                        numstories = float(val) if val != "NA" else np.nan
-                    elif part.startswith("roofshape"):
-                        val = part.replace("roofshape", "")
-                        roofshape = val if val != "NA" else np.nan
-                    elif part.startswith("fpArea"):
-                        val = part.replace("fpArea", "")
-                        fpArea = float(val) if val != "NA" else np.nan
-                
-                # Semantic logic: Amorphous/industrial roofing is functionally 'Flat'
-                if material_label in ["AmorphousMembrane", "AmorphousFabric", "AmorphousConcrete", "AmorphousAsphalt"]:
-                    roofshape = "Flat"
-
-                # Compile finalized record
-                records.append({
-                    "split": split,
-                    "city": city_key,
-                    "latitude": lat,
-                    "longitude": lon,
-                    "material_class": material_label,
-                    "country": df.loc[df['city_key'] == city_key, 'Country'].values[0] if city_key in df['city_key'].values else "Unknown",
-                    "continent": continent,
-                    "filename": filename,
-                    "height": height,
-                    "numstories": numstories,
-                    "roofshape": roofshape,
-                    "fpArea": fpArea
-                })
-                count += 1
-
-    # --- Step 5: Finalization and Export ---
-    output_df = pd.DataFrame(records)
-    output_csv_path = os.path.join(base_dir, "roof_materials_augmented_all.csv")
+    # 5. Apply Semantic Rules (if material_class is present)
+    if 'material_class' in output_df.columns:
+        amorphous_materials = ["AmorphousMembrane", "AmorphousFabric", "AmorphousConcrete", "AmorphousAsphalt"]
+        # If OSM didn't find a roofshape, but it's an amorphous material, force it to Flat
+        output_df.loc[
+            (output_df['material_class'].isin(amorphous_materials)) & (output_df['roofshape'].isna()), 
+            'roofshape'
+        ] = "Flat"
+        
+    # 6. Finalization and Export
+    output_csv_path = os.path.join(base_dir, "roof_materials_augmented_osm.csv")
     output_df.to_csv(output_csv_path, index=False)
     
     print(f"\n✅ Combined metadata CSV saved to: {output_csv_path}")
-    print(f"\nTotal records processed: {count:,}")
-
+    print(f"Total records processed: {len(output_df):,}")
+    
     # Dataset completeness statistics
-    print(f"\n📊 Dataset contains {len(output_df):,} total records\n")
-    for field in ['fpArea', 'height', 'numstories', 'roofshape']:
-        available = output_df[field].notna().sum()
-        percent = (available / len(output_df)) * 100
-        print(f"{field:<12}: {available:,} entries ({percent:.2f}%)")
-
+    print(f"\n📊 Dataset completeness statistics:\n")
+    fields_to_check = ['latitude', 'longitude', 'fpArea', 'height', 'numstories', 'roofshape']
+    for field in fields_to_check:
+        if field in output_df.columns:
+            available = output_df[field].notna().sum()
+            percent = (available / len(output_df)) * 100
+            print(f"{field:<15}: {available:,} entries ({percent:.2f}%)")
 
 # === ENTRY POINT ===
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate metadata CSV for RoofNet images.")
-    # dataset_dir: Target folder containing the split/material subdirectories
+    parser = argparse.ArgumentParser(description="Generate metadata CSV for RoofNet images using OSM.")
     parser.add_argument('--dataset_dir', type=str, required=True, help="Path to the dataset base directory")
-    # city_csv: The resource file containing global city coordinates and country/continent info
-    parser.add_argument('--city_csv', type=str, required=True, help="Path to reference city/coordinate CSV")
+    parser.add_argument('--building_csv', type=str, required=True, help="Path to CSV containing filename, lat, lon")
     args = parser.parse_args()
 
-    main(args.dataset_dir, args.city_csv)
+    main(args.dataset_dir, args.building_csv)

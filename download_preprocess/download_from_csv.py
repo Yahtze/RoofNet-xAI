@@ -9,141 +9,107 @@ will be largely redundant. It is meant for use in the case of having CSV informa
 only (i.e. no imagery).
 
 Call via: 
-    python download_from_csv.py
+    python download_from_csv.py --csv_file <path_to_csv> --keys_file <path_to_keys.json> [--out_dir <output_dir>]
 """
 
 import os
 import time
+import json
 import requests
+import argparse
 import pandas as pd
 
-# === CONFIGURATION AND API SETUP ===
-
-# Load Google Maps Static API key from a local text file
-API_KEY = "" # <-- Insert your API key generated from https://developers.google.com/maps/documentation/maps-static/get-api-key
-
-# Input CSV containing the target filenames and their corresponding geographic coordinates
-CSV_FILE = "test_add_cities.csv" # <-- Insert your CSV file path containing building coordinates 
-
-# Output directory where the downloaded satellite images will be stored
-OUT_DIR = "roofnet_gsat_imagery" 
-
-# CSV file to record metadata for any downloads that fail after multiple attempts
-FAILED_CSV = "failed_downloads.csv" 
-
-# Ensure the output directory exists on the filesystem
-os.makedirs(OUT_DIR, exist_ok=True) 
-
-# Load the download queue into a pandas DataFrame
-df = pd.read_csv(CSV_FILE) 
-
-# Ensure latitude and longitude columns are numeric; non-numeric values are set to NaN
-df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
-df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
-
-# Initialize a persistent requests session to improve performance over multiple requests
-session = requests.Session()
-
-# === HELPER FUNCTIONS ===
-
-def get_image(lat, lon):
-    """
-    Constructs and sends a request to the Google Static Maps API for a satellite 
-    image centered at the provided coordinates.
+def main(csv_file, keys_file, out_dir, failed_csv):
+    # === CONFIGURATION AND API SETUP ===
     
-    Parameters:
-        lat, lon: Geographic coordinates for the center of the image.
-    """
-    url = (
-        "https://maps.googleapis.com/maps/api/staticmap"
-        f"?center={lat},{lon}"
-        "&zoom=20"            # Set zoom level to 20 for high-resolution building views
-        "&size=256x256"       # Request 256x256 pixel tiles
-        "&maptype=satellite"  # Use satellite imagery layer
-        f"&key={API_KEY}"
-    )
-    return session.get(url, timeout=30)
+    # Extract the API key from the provided JSON file
+    with open(keys_file, 'r') as f:
+        keys_data = json.load(f)
+        API_KEY = keys_data.get("google_static_maps_api_key")
+        if not API_KEY:
+            raise ValueError("Could not find 'google_static_maps_api_key' in the provided JSON file.")
 
-# === MAIN DOWNLOAD LOOP ===
+    os.makedirs(out_dir, exist_ok=True) 
 
-failed_rows = [] # List to store metadata for rows that failed validation or download
+    df = pd.read_csv(csv_file) 
+    df["latitude"] = pd.to_numeric(df["latitude"], errors="coerce")
+    df["longitude"] = pd.to_numeric(df["longitude"], errors="coerce")
 
-for i, row in df.iterrows():
-    filename = row["filename"]
-    lat = row["latitude"]
-    lon = row["longitude"]
+    session = requests.Session()
 
-    # Define the full destination path for the current image
-    out_path = os.path.join(OUT_DIR, filename) 
+    def get_image(lat, lon):
+        url = (
+            "https://maps.googleapis.com/maps/api/staticmap"
+            f"?center={lat},{lon}"
+            "&zoom=20"
+            "&size=256x256"
+            "&maptype=satellite"
+            f"&key={API_KEY}"
+        )
+        return session.get(url, timeout=30)
 
-    # Skip download if the file already exists locally (resumable download logic)
-    if os.path.exists(out_path):
-        continue
+    # === MAIN DOWNLOAD LOOP ===
+    failed_rows = [] 
 
-    # Skip download if coordinates are missing or invalid
-    if pd.isna(lat) or pd.isna(lon): 
-        print(f"Bad coordinates: {filename} | lat={lat} lon={lon}")
-        failed_rows.append({
-            "filename": filename,
-            "latitude": lat,
-            "longitude": lon,
-            "reason": "bad_coordinates"
-        })
-        continue
+    for i, row in df.iterrows():
+        filename = row["filename"]
+        lat = row["latitude"]
+        lon = row["longitude"]
 
-    success = False # Flag to track download status across retry attempts
+        out_path = os.path.join(out_dir, filename) 
 
-    # Attempt to download the image up to 5 times in case of transient network errors
-    for attempt in range(1, 6): 
-        try:
-            response = get_image(lat, lon)
+        if os.path.exists(out_path):
+            continue
 
-            # Inspect headers to ensure the response contains actual image data
-            content_type = response.headers.get("Content-Type", "")
-            body_preview = response.text[:200] if "text" in content_type.lower() else ""
+        if pd.isna(lat) or pd.isna(lon): 
+            print(f"Bad coordinates: {filename} | lat={lat} lon={lon}")
+            failed_rows.append({
+                "filename": filename, "latitude": lat, "longitude": lon, "reason": "bad_coordinates"
+            })
+            continue
 
-            # Check for HTTP 200 (OK) and a valid image MIME type
-            if response.status_code == 200 and "image" in content_type.lower(): 
-                with open(out_path, "wb") as f:
-                    f.write(response.content)
-                success = True
-                break
-            
-            # Log failure details for the current attempt
-            print(
-                f"Attempt {attempt}/5 failed for {filename} | "
-                f"status={response.status_code} content_type={content_type} "
-                f"body={body_preview}"
-            )
+        success = False 
+        for attempt in range(1, 6): 
+            try:
+                response = get_image(lat, lon)
+                content_type = response.headers.get("Content-Type", "")
+                body_preview = response.text[:200] if "text" in content_type.lower() else ""
 
-        except Exception as e:
-            # Handle connection errors or timeouts
-            print(f"Attempt {attempt}/5 error for {filename}: {e}")
+                if response.status_code == 200 and "image" in content_type.lower(): 
+                    with open(out_path, "wb") as f:
+                        f.write(response.content)
+                    success = True
+                    break
+                
+                print(f"Attempt {attempt}/5 failed for {filename} | status={response.status_code}")
 
-        # Wait before retrying; sleep duration increases with each attempt (exponential backoff)
-        time.sleep(2 * attempt) 
+            except Exception as e:
+                print(f"Attempt {attempt}/5 error for {filename}: {e}")
 
-    # If all 5 attempts fail, log the record as a persistent failure
-    if not success:
-        failed_rows.append({
-            "filename": filename,
-            "latitude": lat,
-            "longitude": lon,
-            "reason": "request_failed"
-        })
+            time.sleep(2 * attempt) 
 
-    # Display processing progress every 100 images
-    if i % 10 == 0: 
-        print(f"Processed {i}/{len(df)}")
+        if not success:
+            failed_rows.append({
+                "filename": filename, "latitude": lat, "longitude": lon, "reason": "request_failed"
+            })
 
-    # Short delay to prevent overwhelming the API or exceeding rate limits
-    time.sleep(0.2)
+        if i % 10 == 0: 
+            print(f"Processed {i}/{len(df)}")
+        time.sleep(0.2)
 
-# === FINALIZATION ===
+    # === FINALIZATION ===
+    if failed_rows: 
+        pd.DataFrame(failed_rows).to_csv(failed_csv, index=False)
+        print(f"Saved failed rows to {failed_csv}")
+    else:
+        print("No failed rows.")
 
-# Export all failed records to a CSV file for manual review or re-processing
-if failed_rows: 
-    pd.DataFrame(failed_rows).to_csv(FAILED_CSV, index=False)
-    print(f"Saved failed rows to {FAILED_CSV}")
-else:
-    print("No failed rows.")
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Download satellite imagery from Google Static Maps API.")
+    parser.add_argument('--csv_file', type=str, required=True, help="Path to the CSV file containing building coordinates")
+    parser.add_argument('--keys_file', type=str, default='../resources/keys.json', help="Path to the keys.json file containing the API key")
+    parser.add_argument('--out_dir', type=str, default="roofnet_gsat_imagery", help="Output directory for satellite images")
+    parser.add_argument('--failed_csv', type=str, default="failed_downloads.csv", help="Output CSV for failed downloads")
+    
+    args = parser.parse_args()
+    main(args.csv_file, args.keys_file, args.out_dir, args.failed_csv)

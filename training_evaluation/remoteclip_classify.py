@@ -2,169 +2,151 @@
 remoteclip_classify.py
 ====================
 OBJECTIVE: Use fine-tuned weights of the RemoteCLIP ViT-L/14 base model to 
-classify materials in new roofing images.
+classify materials in new roofing images, sort them into directories, and 
+update a metadata CSV with the predicted classes.
 
 NOTE: We **highly** suggest running verify_material_classes.py on the 
 results in order to validate the plausibility of the model predictions.
 
-Saves:
-  Series of classified images to predicted material folder.
-
 Usage:
-    python remoteclip_classify.py
-
+    python remoteclip_classify.py --classification_dir <path> --results_dir <path> --model_weights <path> --metadata_csv <path>
 """
 
-# === IMPORTS === #
 import os
 import torch
 import shutil
+import argparse
+import pandas as pd
 from torchvision import transforms
 from PIL import Image
 from pathlib import Path
 import open_clip
 
-# === CONFIGURATION ===
-# Path to the source directory containing images that need to be categorized
-CLASSIFICATION_DIR = '' 
-
-# Path where the results and sorted material folders will be stored
-RESULTS_PATH = os.path.join(CLASSIFICATION_DIR, '../results')
-
-# Path to the fine-tuned model weights (.pth file)
-model_weights_path = 'path/to/your/model.pth' 
-
-# The base directory where classified images will be moved
-output_base_dir = RESULTS_PATH 
-
-# Set calculation device: uses GPU (cuda) if available, otherwise defaults to CPU
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
 # List of target material categories (labels) for classification
-material_classes = [
+MATERIAL_CLASSES = [
     "Thatch", "StoneSlates", "ClayTiles", "AsphaltTiles",
     "ConcreteTiles", "WoodTiles", "MetalSheetMaterials", "PolycarbonateSheetMaterials",
     "GlassSheetMaterials", "AmorphousConcrete", "AmorphousAsphalt",
     "AmorphousMembrane", "AmorphousFabric", "Unknown", "GreenVegetative"
 ]
 
-# Initialize the CLIP model (Vision Transformer L/14) with pre-trained weights
-model, _, _ = open_clip.create_model_and_transforms('ViT-L-14', pretrained='laion2b_s32b_b82k')
-
-# Image preprocessing pipeline to format images for the CLIP model:
-# 1. Resize to 224x224 pixels
-# 2. Convert to a numerical tensor
-# 3. Normalize using standard CLIP mean and standard deviation values
-preprocess = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
-                         std=[0.26862954, 0.26130258, 0.27577711])
-])
-
-# Load the specific tokenizer for the ViT-L-14 model architecture
-tokenizer = open_clip.get_tokenizer('ViT-L-14')
-
-# Load the custom fine-tuned weights into the model
-model.load_state_dict(torch.load(model_weights_path, map_location=device))
-model.to(device)
-
-# Set model to evaluation mode to ensure consistent predictions
-model.eval()
-
-# Create subdirectories for every material class if they do not already exist
-for material in material_classes:
-    os.makedirs(os.path.join(output_base_dir, material), exist_ok=True)
-
-# === FUNCTIONS ===
-
 def build_prompts(city_name):
     """Generates descriptive text prompts to compare against images."""
-    prompts = [f"{material} in {city_name}" for material in material_classes]
+    prompts = [f"{material} in {city_name}" for material in MATERIAL_CLASSES]
     return prompts
 
 def extract_city_name_from_filename(filename):
-    """
-    Parses the filename to identify the city name. 
-    Handles variations like 'City-ID.png' or 'City_heightXX.png'.
-    """
-    base = os.path.splitext(os.path.basename(filename))[0]
+    """Parses the filename to identify the city name."""
     base = Path(filename).stem
     if '-' in base:
         city_part = base.split('-')[0]
-        city_name = city_part.replace('_', ' ').title()
-        return city_name
+        return city_part.replace('_', ' ').title()
     elif 'height' in base:
         city_part = base.split('_height')[0]
-        city_name = city_part.replace('_', ' ').title()
-        return city_name
+        return city_part.replace('_', ' ').title()
     elif 'imsat' in base:
         city_part = base.split('_imsat')[0]
-        city_name = city_part.replace('_', ' ').title()
-    return city_name
+        return city_part.replace('_', ' ').title()
+    return base
 
-def already_classified(img_name):
-    """Checks if the image has already been moved to one of the result folders."""
-    for material in material_classes:
-        target_path = os.path.join(output_base_dir, material, img_name)
-        if os.path.exists(target_path):
-            return True
-    return False
-
-def predict_and_move(image_path, city_name):
-    """
-    Performs inference on an image and moves the file to the predicted material folder.
-    """
-    # Load image and convert to standard RGB
+def predict_and_move(image_path, city_name, model, tokenizer, preprocess, device, output_base_dir):
+    """Performs inference on an image, moves the file to the predicted material folder, and returns the prediction."""
     image = Image.open(image_path).convert("RGB")
-
-    # Reject images that are too small to provide meaningful features
     width, height = image.size
     area = width * height
 
     if area <= 1000:
         print(f"{os.path.basename(image_path)} too small ({area} px), skipping.")
-        return
+        return None
 
-    # Prepare the image for the model
     image = preprocess(image).unsqueeze(0).to(device)
-
-    # Convert text prompts into numerical tokens
     prompts = build_prompts(city_name)
     tokenized_prompts = tokenizer(prompts).to(device)
 
-    # Calculate feature vectors for both image and text
     with torch.no_grad():
         image_features = model.encode_image(image)
         text_features = model.encode_text(tokenized_prompts)
 
-    # Normalize vectors so the comparison (dot product) reflects similarity
     image_features /= image_features.norm(dim=-1, keepdim=True)
     text_features /= text_features.norm(dim=-1, keepdim=True)
 
-    # Calculate similarity scores and identify the best match
     similarities = (100.0 * image_features @ text_features.T).squeeze(0)
     best_idx = similarities.argmax().item()
-    predicted_material = material_classes[best_idx]
+    predicted_material = MATERIAL_CLASSES[best_idx]
 
-    # Relocate the file to the directory named after the predicted material
     target_dir = os.path.join(output_base_dir, predicted_material)
     try:
-      shutil.move(image_path, target_dir)
-      print(f"{os.path.basename(image_path)} classified as {predicted_material} and moved.")
-    except:
-      print(f"{os.path.basename(image_path)} already present.")
+        shutil.copy2(image_path, target_dir)
+        print(f"{os.path.basename(image_path)} classified as {predicted_material} and moved.")
+    except Exception:
+        print(f"{os.path.basename(image_path)} already present in {predicted_material}.")
+        
+    return predicted_material
 
-# === MAIN LOOP ===
-# Loop through the files in the classification directory and process each image
-for material in material_classes:
-  input_images_dir = os.path.join(CLASSIFICATION_DIR)
+def main(classification_dir, results_dir, model_weights_path, metadata_csv):
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    print(f"Using device: {device}")
 
-  for img_file in os.listdir(input_images_dir):
-      # Process only valid image file types
-      if img_file.lower().endswith(('.jpg', '.jpeg', '.png')):
-          full_path = os.path.join(input_images_dir, img_file)
-          # Extract location metadata for more accurate prompt matching
-          city_name = extract_city_name_from_filename(img_file)
-          # Execute prediction and file organization
-          predict_and_move(full_path, city_name)
+    # Load the CSV metadata
+    print(f"Loading metadata from {metadata_csv}...")
+    try:
+        df = pd.read_csv(metadata_csv)
+    except UnicodeDecodeError:
+        # Fallback to latin-1 if there are special characters in city names
+        df = pd.read_csv(metadata_csv, encoding='latin-1')
+        
+    if 'material_class' not in df.columns:
+        df['material_class'] = None
+    df['material_class'] = df['material_class'].astype(object)
+
+    # Initialize model
+    print("Loading RemoteCLIP model...")
+    model, _, _ = open_clip.create_model_and_transforms('ViT-L-14', pretrained='laion2b_s32b_b82k')
+    
+    preprocess = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
+                             std=[0.26862954, 0.26130258, 0.27577711])
+    ])
+    tokenizer = open_clip.get_tokenizer('ViT-L-14')
+
+    model.load_state_dict(torch.load(model_weights_path, map_location=device))
+    model.to(device)
+    model.eval()
+
+    # Create subdirectories for every material class
+    for material in MATERIAL_CLASSES:
+        os.makedirs(os.path.join(results_dir, material), exist_ok=True)
+
+    print(f"Processing images in {classification_dir}...")
+    for img_file in os.listdir(classification_dir):
+        if img_file.lower().endswith(('.jpg', '.jpeg', '.png')):
+            full_path = os.path.join(classification_dir, img_file)
+            city_name = extract_city_name_from_filename(img_file)
+            
+            # Predict and move
+            predicted_material = predict_and_move(full_path, city_name, model, tokenizer, preprocess, device, results_dir)
+            
+            # Update DataFrame
+            if predicted_material:
+                mask = df['filename'] == img_file
+                if mask.any():
+                    df.loc[mask, 'material_class'] = predicted_material
+                else:
+                    print(f"  ⚠️ Warning: {img_file} not found in {os.path.basename(metadata_csv)}. Skipping CSV update for this file.")
+
+    # Overwrite the CSV with the new material_class column included
+    print(f"Saving updated metadata back to {metadata_csv}...")
+    df.to_csv(metadata_csv, index=False)
+    print("Process complete!")
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Classify roof materials using RemoteCLIP.")
+    parser.add_argument('--classification_dir', type=str, required=True, help="Directory containing cropped images to classify")
+    parser.add_argument('--results_dir', type=str, default='classified_roofs', help="Output directory to store sorted folders")
+    parser.add_argument('--model_weights', type=str, required=True, help="Path to .pth file containing classification model weights")
+    parser.add_argument('--metadata_csv', type=str, required=True, help="Path to the CSV containing roof metadata")
+    
+    args = parser.parse_args()
+    main(args.classification_dir, args.results_dir, args.model_weights, args.metadata_csv)
