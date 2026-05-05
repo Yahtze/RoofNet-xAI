@@ -91,7 +91,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Verify material classes using a building metadata CSV.")
     parser.add_argument('--dataset_dir', type=str, required=True, 
                         help="Path to the dataset base directory containing material subfolders")
-    parser.add_argument('--city_materials_csv', type=str, default='../resources/City_Roof_Materials_with_Continent_and_Country_Centroids.csv', 
+    parser.add_argument('--city_materials_csv', type=str, default='resources/City_Roof_Materials_with_Continent_and_Country_Centroids.csv', 
                         help="Path to the reference CSV with allowed materials per city (e.g., City_Roof_Materials_with_Continent_and_Country_Centroids.csv)")
     parser.add_argument('--building_csv', type=str, required=True, 
                         help="Path to the CSV containing building metadata mapping filenames to cities")

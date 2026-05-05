@@ -182,7 +182,7 @@ def extract_structural_attributes(lat, lon, dist=25):
 
 # === MAIN PROCESSING LOGIC ===
 
-def main(base_dir, building_csv_path):
+def main(base_dir, building_csv_path, out_dir):
     # 1. Load the per-building CSV
     print(f"Loading building metadata from {building_csv_path}...")
     df_metadata = pd.read_csv(building_csv_path)
@@ -249,7 +249,7 @@ def main(base_dir, building_csv_path):
         ] = "Flat"
         
     # 6. Finalization and Export
-    output_csv_path = os.path.join(base_dir, "roof_materials_augmented_osm.csv")
+    output_csv_path = os.path.join(out_dir, "roof_materials_augmented_osm.csv")
     output_df.to_csv(output_csv_path, index=False)
     
     print(f"\n✅ Combined metadata CSV saved to: {output_csv_path}")
@@ -270,6 +270,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate metadata CSV for RoofNet images using OSM.")
     parser.add_argument('--dataset_dir', type=str, required=True, help="Path to the dataset base directory")
     parser.add_argument('--building_csv', type=str, required=True, help="Path to CSV containing filename, lat, lon")
+    parser.add_argument('--out_dir', type=str, required=True, help="Desired output path for augmented CSV")
     args = parser.parse_args()
 
-    main(args.dataset_dir, args.building_csv)
+    main(args.dataset_dir, args.building_csv, args.out_dir)

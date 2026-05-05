@@ -107,7 +107,7 @@ def main(csv_file, keys_file, out_dir, failed_csv):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Download satellite imagery from Google Static Maps API.")
     parser.add_argument('--csv_file', type=str, required=True, help="Path to the CSV file containing building coordinates")
-    parser.add_argument('--keys_file', type=str, default='../resources/keys.json', help="Path to the keys.json file containing the API key")
+    parser.add_argument('--keys_file', type=str, default='resources/keys.json', help="Path to the keys.json file containing the API key")
     parser.add_argument('--out_dir', type=str, default="roofnet_gsat_imagery", help="Output directory for satellite images")
     parser.add_argument('--failed_csv', type=str, default="failed_downloads.csv", help="Output CSV for failed downloads")
     
