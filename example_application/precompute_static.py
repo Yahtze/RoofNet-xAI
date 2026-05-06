@@ -63,7 +63,7 @@ GRID_XML       = "./reference_data/ground_motion_grid.xml" # derived from ShakeM
 UNCERTAINTY_XML= "./reference_data/uncertainty.xml" # derived from ShakeMap Atlas V4.0
 JSON_PATTERN = f"{XBD_PATH}/*_pre_disaster.json"
 CSV_PATH = "../resources/roofnet_metadata.csv"
-IMPACT_CSV_PATH = "./reference_data/Impact_Buildings_Detailed.csv" # from the GEM Foundation's GEID
+IMPACT_CSV_PATH = "Please download Impact_Buildings_Detailed.csv from https://github.com/gem/geid/blob/main/North_America/Mexico/20170919_M7.1_Puebla/1_Impact/Impact_Buildings_Detailed.csv and enter the path here"
 
 CACHE_DIR      = "./cache"
 try:
