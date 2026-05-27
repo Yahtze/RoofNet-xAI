@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import types
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Sequence, Tuple
 
@@ -153,6 +154,11 @@ def get_visual_patch_grid_size(model: torch.nn.Module) -> int:
     return int(grid_size)
 
 
+def _warn_and_print(message: str) -> None:
+    warnings.warn(message, RuntimeWarning, stacklevel=2)
+    print(f"WARNING: {message}")
+
+
 def gradient_weighted_attention(attention: torch.Tensor, gradients: torch.Tensor) -> torch.Tensor:
     if attention.ndim != 4 or gradients.ndim != 4:
         raise ValueError("Expected attention and gradients with shape [batch, heads, seq, seq]")
@@ -161,7 +167,14 @@ def gradient_weighted_attention(attention: torch.Tensor, gradients: torch.Tensor
 
     attention_mean = attention.mean(dim=1)[0]
     gradient_mean = gradients.mean(dim=1)[0]
-    relevance = torch.relu(attention_mean * gradient_mean)
+    raw_relevance = attention_mean * gradient_mean
+    relevance = torch.relu(raw_relevance)
+    if float(relevance.max()) <= 1e-6 and float(raw_relevance.abs().max()) > 1e-6:
+        _warn_and_print(
+            "Transformer explainability ReLU zeroed all attention-gradient relevance; "
+            "using absolute relevance magnitude. Interpret heatmap as negative/inverted evidence, not positive evidence."
+        )
+        relevance = raw_relevance.abs()
     relevance = normalize_rows(relevance)
     identity = torch.eye(relevance.size(-1), device=relevance.device, dtype=relevance.dtype)
     return relevance + identity
@@ -199,8 +212,17 @@ def patch_relevance_to_heatmap(
 
     grid = patch_relevance.reshape(1, 1, patch_grid_size, patch_grid_size).float()
     upsampled = F.interpolate(grid, size=image_size, mode="bilinear", align_corners=False)[0, 0]
+    raw_min = float(upsampled.min())
+    raw_max = float(upsampled.max())
     upsampled = upsampled - upsampled.min()
-    upsampled = upsampled / upsampled.max().clamp_min(1e-6)
+    denom = upsampled.max()
+    if float(denom) <= 1e-6:
+        _warn_and_print(
+            f"Transformer explainability patch relevance collapsed during normalization "
+            f"(raw min={raw_min:.6g}, raw max={raw_max:.6g}); returning zero heatmap."
+        )
+        return torch.zeros_like(upsampled).detach().cpu().numpy()
+    upsampled = upsampled / denom.clamp_min(1e-6)
     return upsampled.detach().cpu().numpy()
 
 
@@ -243,9 +265,22 @@ def transformer_explainability(
     try:
         with torch.enable_grad():
             score = compute_similarity_score(model, tokenizer, image_for_grad, prompts, target_idx)
+            print(f"Transformer explainability target logit: {float(score.detach()):.6g}")
             score.backward()
-        layer_relevances = collect_layer_relevances(session.ordered_attention_and_gradients())
+        attention_gradient_pairs = session.ordered_attention_and_gradients()
+        grad_abs_max = max(float(gradient.abs().max()) for _, gradient in attention_gradient_pairs)
+        grad_abs_mean = sum(float(gradient.abs().mean()) for _, gradient in attention_gradient_pairs) / len(attention_gradient_pairs)
+        print(
+            "Transformer explainability gradient stats: "
+            f"layers={len(attention_gradient_pairs)}, abs_max={grad_abs_max:.6g}, abs_mean={grad_abs_mean:.6g}"
+        )
+        layer_relevances = collect_layer_relevances(attention_gradient_pairs)
         patch_relevance = rollout_cls_patch_relevance(layer_relevances)
+        print(
+            "Transformer explainability patch relevance stats before normalization: "
+            f"min={float(patch_relevance.min()):.6g}, max={float(patch_relevance.max()):.6g}, "
+            f"abs_max={float(patch_relevance.abs().max()):.6g}"
+        )
         if patch_relevance.numel() != expected_token_count - 1:
             raise ValueError(
                 f"Expected {expected_token_count - 1} patch tokens from visual transformer, got {patch_relevance.numel()}"

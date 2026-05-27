@@ -97,6 +97,7 @@ def _():
     from torchvision import transforms
     import matplotlib.pyplot as plt
 
+    import captum_gradcam
     from transformer_explainability import transformer_explainability
 
     try:
@@ -150,6 +151,7 @@ def _():
         Path,
         REPO_ROOT,
         Tuple,
+        captum_gradcam,
         dataclass,
         kagglehub,
         nn,
@@ -167,8 +169,6 @@ def _():
 def _(mo):
     mo.md(r"""
     ## 2. Labels, prompts, and preprocessing
-
-    Matches `training_evaluation/remoteclip_classify.py`.
     """)
     return
 
@@ -410,8 +410,18 @@ def _(mo):
 def _(Image, np, plt, torch):
     def normalize_attr(attr: np.ndarray, eps: float = 1e-8) -> np.ndarray:
         attr = np.asarray(attr, dtype=np.float32)
+        raw_min = float(np.nanmin(attr))
+        raw_max = float(np.nanmax(attr))
+        attr = np.nan_to_num(attr, nan=0.0, posinf=0.0, neginf=0.0)
         attr = attr - attr.min()
-        return attr / (attr.max() + eps)
+        denom = float(attr.max())
+        if denom <= eps:
+            print(
+                "WARNING: Attribution heatmap is constant/zero before display normalization; "
+                f"raw min={raw_min:.6g}, raw max={raw_max:.6g}."
+            )
+            return np.zeros_like(attr, dtype=np.float32)
+        return attr / (denom + eps)
 
     def show_attribution(image: Image.Image, heatmap: np.ndarray, title: str, alpha: float = 0.45, cmap: str = "inferno"):
         heatmap = normalize_attr(heatmap)
@@ -498,15 +508,18 @@ def _(
             image_size=(224, 224),
         )
 
-    return
+    TRANSFORMER_EXPLAINABILITY_REGISTERED = True
+    return (TRANSFORMER_EXPLAINABILITY_REGISTERED,)
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 9. Captum GradCAM placeholder
+    ## 9. Captum GradCAM
 
-    TODO: choose target layer from `model.visual`. For ViT, useful targets may require reshape from patch tokens to spatial grid.
+    Captum LayerGradCAM variants:
+    - `captum_gradcam_vit_tokens`: last visual transformer block, CLS dropped, patch tokens reshaped to grid
+    - `captum_gradcam_patch_embed`: raw patch projection layer `model.visual.conv1`
     """)
     return
 
@@ -515,6 +528,8 @@ def _(mo):
 def _(
     LayerGradCam,
     List,
+    captum_gradcam,
+    model,
     nn,
     np,
     register_attribution,
@@ -535,16 +550,40 @@ def _(
             if any(key in name.lower() for key in ["block", "resblock", "attn", "ln_post"]):
                 print(name, "->", module.__class__.__name__)
 
-    @register_attribution("captum_layer_gradcam")
-    def captum_layer_gradcam_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
+    @register_attribution("captum_gradcam_vit_tokens")
+    def captum_gradcam_vit_tokens_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
         if LayerGradCam is None:
             raise ImportError("Install captum: pip install captum")
-        raise NotImplementedError(
-            "TODO: select a ViT visual layer and implement LayerGradCam. "
-            "Run inspect_visual_layers(model) to pick candidate layer."
-        )
+        score_module = TargetScoreModule(prompts, target_idx)
+        model.zero_grad(set_to_none=True)
+        try:
+            return captum_gradcam.vit_token_gradcam_heatmap(
+                model=model,
+                score_forward=score_module,
+                image_tensor=image_tensor,
+                layer_gradcam_cls=LayerGradCam,
+            )
+        finally:
+            model.zero_grad(set_to_none=True)
 
-    return
+    @register_attribution("captum_gradcam_patch_embed")
+    def captum_gradcam_patch_embed_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
+        if LayerGradCam is None:
+            raise ImportError("Install captum: pip install captum")
+        score_module = TargetScoreModule(prompts, target_idx)
+        model.zero_grad(set_to_none=True)
+        try:
+            return captum_gradcam.patch_embed_gradcam_heatmap(
+                model=model,
+                score_forward=score_module,
+                image_tensor=image_tensor,
+                layer_gradcam_cls=LayerGradCam,
+            )
+        finally:
+            model.zero_grad(set_to_none=True)
+
+    CAPTUM_GRADCAM_METHODS_REGISTERED = True
+    return (CAPTUM_GRADCAM_METHODS_REGISTERED,)
 
 
 @app.cell(hide_code=True)
@@ -582,7 +621,9 @@ def _(mo):
 @app.cell
 def _(
     ATTRIBUTION_METHODS: "Dict[str, AttributionFn]",
+    CAPTUM_GRADCAM_METHODS_REGISTERED,
     MATERIAL_CLASSES,
+    TRANSFORMER_EXPLAINABILITY_REGISTERED,
     image_tensor,
     mo,
     pil_img,
@@ -590,15 +631,62 @@ def _(
     show_attribution,
     topk,
 ):
-    METHOD = "transformer_explainability"  # transformer_explainability | captum_layer_gradcam | captum_integrated_gradients
-    TARGET_IDX = int(topk.indices[0].item())
+    _ = (CAPTUM_GRADCAM_METHODS_REGISTERED, TRANSFORMER_EXPLAINABILITY_REGISTERED)
 
-    try:
-        heatmap = ATTRIBUTION_METHODS[METHOD](image_tensor, TARGET_IDX, prompts)
-        fig = show_attribution(pil_img, heatmap, f"{METHOD}: {MATERIAL_CLASSES[TARGET_IDX]}")
-        mo.output.replace(fig)
-    except NotImplementedError as exc:
-        print(exc)
+    def run_attribution_method(method_name: str) -> None:
+        target_idx = int(topk.indices[0].item())
+        try:
+            method_heatmap = ATTRIBUTION_METHODS[method_name](image_tensor, target_idx, prompts)
+            method_fig = show_attribution(pil_img, method_heatmap, f"{method_name}: {MATERIAL_CLASSES[target_idx]}")
+            mo.output.replace(method_fig)
+        except KeyError as exc:
+            available_methods = ", ".join(sorted(ATTRIBUTION_METHODS))
+            raise KeyError(f"Unknown attribution method {method_name!r}. Available: {available_methods}") from exc
+        except NotImplementedError as exc:
+            print(exc)
+
+    return (run_attribution_method,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Run Transformer Explainability
+    """)
+    return
+
+
+@app.cell
+def _(run_attribution_method):
+    run_attribution_method("transformer_explainability")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Run ViT-token GradCAM
+    """)
+    return
+
+
+@app.cell
+def _(run_attribution_method):
+    run_attribution_method("captum_gradcam_vit_tokens")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Run patch-embed GradCAM
+    """)
+    return
+
+
+@app.cell
+def _(run_attribution_method):
+    run_attribution_method("captum_gradcam_patch_embed")
     return
 
 
