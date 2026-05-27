@@ -4,9 +4,12 @@ croissant_rai_RoofNet-Kaggle.json
 roofnet_metadata.csv
 xBD_cropped_roofs/
 
-# === Local notebooks/experiments ===
-xAI_notebooks/
+# === Local cache/runtime artifacts ===
+__pycache__/
+*.py[cod]
+__marimo__/
 
 # === Repo policy ignores ===
 docs/
 AGENTS.md
+test/
