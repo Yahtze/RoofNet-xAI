@@ -13,3 +13,6 @@ __marimo__/
 docs/
 AGENTS.md
 test/
+
+# === OS artifacts ===
+.DS_Store
