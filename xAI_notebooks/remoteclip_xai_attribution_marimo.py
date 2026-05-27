@@ -99,6 +99,7 @@ def _():
 
     import captum_gradcam
     import captum_integrated_gradients
+    import rise
     from transformer_explainability import transformer_explainability
 
     try:
@@ -151,6 +152,7 @@ def _():
         Optional,
         Path,
         REPO_ROOT,
+        SEED,
         Tuple,
         captum_gradcam,
         captum_integrated_gradients,
@@ -161,6 +163,7 @@ def _():
         open_clip,
         plt,
         random,
+        rise,
         torch,
         transformer_explainability,
         transforms,
@@ -660,7 +663,57 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 11. Run one attribution method
+    ## 11. RISE raw-image black-box attribution
+
+    `rise_raw_image` uses randomized input sampling with mean-baseline masks in CLIP-normalized tensor space. It runs many masked RemoteCLIP forwards in chunks, so expect it to be slower than gradient/attention methods.
+    """)
+    return
+
+
+@app.cell
+def _(
+    List,
+    SEED,
+    model,
+    np,
+    register_attribution,
+    rise,
+    tokenizer,
+    torch,
+):
+    def rise_unscaled_target_score(image_batch: torch.Tensor, target_idx: int, prompts: List[str]) -> torch.Tensor:
+        tokenized = tokenizer(prompts).to(image_batch.device)
+        image_features = model.encode_image(image_batch)
+        text_features = model.encode_text(tokenized)
+        image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+        text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+        return image_features @ text_features.T[:, target_idx]
+
+    @register_attribution("rise_raw_image")
+    def rise_raw_image_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
+        generator_device = image_tensor.device if image_tensor.device.type != "mps" else "cpu"
+        generator = torch.Generator(device=generator_device).manual_seed(SEED)
+        model.eval()
+        return rise.rise_heatmap(
+            score_forward=lambda masked_batch: rise_unscaled_target_score(masked_batch, target_idx, prompts),
+            image_tensor=image_tensor,
+            num_masks=512,
+            mask_grid_size=12,
+            p_save=0.5,
+            batch_size=32,
+            mask_device=image_tensor.device,
+            return_diagnostics=True,
+            generator=generator,
+        )[0]
+
+    RISE_METHODS_REGISTERED = True
+    return (RISE_METHODS_REGISTERED,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 12. Run one attribution method
     """)
     return
 
@@ -671,6 +724,7 @@ def _(
     CAPTUM_GRADCAM_METHODS_REGISTERED,
     CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
     MATERIAL_CLASSES,
+    RISE_METHODS_REGISTERED,
     TRANSFORMER_EXPLAINABILITY_REGISTERED,
     image_tensor,
     mo,
@@ -682,6 +736,7 @@ def _(
     _ = (
         CAPTUM_GRADCAM_METHODS_REGISTERED,
         CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
+        RISE_METHODS_REGISTERED,
         TRANSFORMER_EXPLAINABILITY_REGISTERED,
     )
 
@@ -773,9 +828,26 @@ def _(run_attribution_method):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 12. Batch/run config placeholder
+    ### Run RISE raw-image black-box attribution
+
+    Slow path: generates 512 soft masks and runs RemoteCLIP in chunks. Increase `num_masks` to 1024–2000+ only for higher-quality offline/publication runs.
+    """)
+    return
+
+
+@app.cell
+def _(run_attribution_method):
+    run_attribution_method("rise_raw_image")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 13. Batch/run config placeholder
 
     TODO: iterate over selected images and methods, save overlays to `xAI_outputs/`.
+    Future task: add Batch Comparison Cell for selected methods/images with side-by-side outputs.
     """)
     return
 
