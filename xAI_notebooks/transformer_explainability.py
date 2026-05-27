@@ -7,6 +7,7 @@ from typing import Dict, Iterable, List, Sequence, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
+from torch.nn.functional import linear, softmax
 
 
 VIT_L_14_PATCH_GRID_SIZE = 16
@@ -48,14 +49,12 @@ class TransformerExplainabilitySession:
         def attention_wrapper(block, q_x, k_x=None, v_x=None, attn_mask=None):
             k_x = k_x if k_x is not None else q_x
             v_x = v_x if v_x is not None else q_x
-            attn_mask_local = attn_mask.to(q_x.dtype) if attn_mask is not None else None
-            attn_output, attn_weights = block.attn(
+            attn_output, attn_weights = manual_multihead_attention(
+                block.attn,
                 q_x,
                 k_x,
                 v_x,
-                need_weights=True,
-                average_attn_weights=False,
-                attn_mask=attn_mask_local,
+                attn_mask=attn_mask,
             )
             session.captures[layer_idx].attention = attn_weights
             attn_weights.register_hook(session._make_gradient_hook(layer_idx))
@@ -77,6 +76,70 @@ class TransformerExplainabilitySession:
                 raise RuntimeError(f"Missing attention capture for visual transformer layer {layer_idx}")
             pairs.append((capture.attention.detach(), capture.gradient.detach()))
         return pairs
+
+
+def manual_multihead_self_attention(
+    attn_module: torch.nn.MultiheadAttention,
+    q_x: torch.Tensor,
+    attn_mask: torch.Tensor | None = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return manual_multihead_attention(attn_module, q_x, q_x, q_x, attn_mask=attn_mask)
+
+
+def manual_multihead_attention(
+    attn_module: torch.nn.MultiheadAttention,
+    q_x: torch.Tensor,
+    k_x: torch.Tensor,
+    v_x: torch.Tensor,
+    attn_mask: torch.Tensor | None = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    if not attn_module.batch_first:
+        raise ValueError("Expected batch_first=True for manual attention path")
+    if attn_module.bias_k is not None or attn_module.bias_v is not None:
+        raise NotImplementedError("manual attention path does not support bias_k/bias_v")
+    if attn_module.add_zero_attn:
+        raise NotImplementedError("manual attention path does not support add_zero_attn")
+
+    batch_size, target_len, embed_dim = q_x.shape
+    source_len = k_x.shape[1]
+    num_heads = attn_module.num_heads
+    head_dim = embed_dim // num_heads
+    scale = head_dim ** -0.5
+
+    if not attn_module._qkv_same_embed_dim:
+        raise NotImplementedError("manual attention path expects shared qkv embed dim")
+
+    in_proj_weight = attn_module.in_proj_weight
+    in_proj_bias = attn_module.in_proj_bias
+    q_weight, k_weight, v_weight = in_proj_weight.chunk(3, dim=0)
+    if in_proj_bias is not None:
+        q_bias, k_bias, v_bias = in_proj_bias.chunk(3, dim=0)
+    else:
+        q_bias = k_bias = v_bias = None
+
+    q = linear(q_x, q_weight, q_bias)
+    k = linear(k_x, k_weight, k_bias)
+    v = linear(v_x, v_weight, v_bias)
+
+    q = q.view(batch_size, target_len, num_heads, head_dim).transpose(1, 2)
+    k = k.view(batch_size, source_len, num_heads, head_dim).transpose(1, 2)
+    v = v.view(batch_size, source_len, num_heads, head_dim).transpose(1, 2)
+
+    scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+    if attn_mask is not None:
+        mask = attn_mask.to(dtype=scores.dtype, device=scores.device)
+        if mask.ndim == 2:
+            scores = scores + mask.unsqueeze(0).unsqueeze(0)
+        elif mask.ndim == 3:
+            scores = scores + mask.view(batch_size, num_heads, target_len, source_len)
+        else:
+            raise ValueError("attn_mask must have 2 or 3 dims")
+
+    attn_probs = softmax(scores, dim=-1)
+    attn_output = torch.matmul(attn_probs, v)
+    attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, target_len, embed_dim)
+    attn_output = attn_module.out_proj(attn_output)
+    return attn_output, attn_probs
 
 
 def get_visual_patch_grid_size(model: torch.nn.Module) -> int:

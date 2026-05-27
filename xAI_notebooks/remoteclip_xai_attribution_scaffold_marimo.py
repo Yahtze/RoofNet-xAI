@@ -23,7 +23,7 @@ def _(mo):
     - Captum LayerGradCAM / GradCAM-style attribution
     - Captum Integrated Gradients
 
-    > This notebook is intentionally a scaffold: model loading, asset resolution, inference, and visualization utilities are runnable; attribution methods are TODO stubs to flesh out next.
+    > This notebook is intentionally a scaffold: model loading, asset resolution, inference, visualization, and Transformer Explainability are runnable; Captum-based attribution methods remain to be filled in next.
     """)
     return
 
@@ -71,7 +71,6 @@ def _():
         subprocess.check_call([sys.executable, "-m", "pip", "install", *packages_to_install])
     else:
         print(f"All optional notebook packages import from {sys.executable}")
-
     return
 
 
@@ -416,11 +415,14 @@ def _(Image, np, plt, torch):
 
     def show_attribution(image: Image.Image, heatmap: np.ndarray, title: str, alpha: float = 0.45, cmap: str = "inferno"):
         heatmap = normalize_attr(heatmap)
+        resample = getattr(Image, "Resampling", Image).BILINEAR
+        heatmap = np.asarray(Image.fromarray(heatmap).resize(image.size, resample=resample))
         fig, axes = plt.subplots(1, 3, figsize=(12, 4))
         axes[0].imshow(image); axes[0].set_title("Input"); axes[0].axis("off")
         axes[1].imshow(heatmap, cmap=cmap); axes[1].set_title("Attribution"); axes[1].axis("off")
         axes[2].imshow(image); axes[2].imshow(heatmap, cmap=cmap, alpha=alpha); axes[2].set_title(title); axes[2].axis("off")
         plt.tight_layout()
+        plt.close(fig)
         return fig
 
     def tensor_attr_to_heatmap(attr: torch.Tensor) -> np.ndarray:
@@ -476,7 +478,15 @@ def _(mo):
 
 
 @app.cell
-def _(List, model, np, register_attribution, tokenizer, torch, transformer_explainability):
+def _(
+    List,
+    model,
+    np,
+    register_attribution,
+    tokenizer,
+    torch,
+    transformer_explainability,
+):
     @register_attribution("transformer_explainability")
     def transformer_explainability_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
         return transformer_explainability(
@@ -574,17 +584,19 @@ def _(
     ATTRIBUTION_METHODS: "Dict[str, AttributionFn]",
     MATERIAL_CLASSES,
     image_tensor,
+    mo,
     pil_img,
     prompts,
     show_attribution,
     topk,
 ):
-    METHOD = "captum_integrated_gradients"  # transformer_explainability | captum_layer_gradcam | captum_integrated_gradients
+    METHOD = "transformer_explainability"  # transformer_explainability | captum_layer_gradcam | captum_integrated_gradients
     TARGET_IDX = int(topk.indices[0].item())
 
     try:
         heatmap = ATTRIBUTION_METHODS[METHOD](image_tensor, TARGET_IDX, prompts)
-        show_attribution(pil_img, heatmap, f"{METHOD}: {MATERIAL_CLASSES[TARGET_IDX]}")
+        fig = show_attribution(pil_img, heatmap, f"{METHOD}: {MATERIAL_CLASSES[TARGET_IDX]}")
+        mo.output.replace(fig)
     except NotImplementedError as exc:
         print(exc)
     return
@@ -617,4 +629,3 @@ def _(ATTRIBUTION_METHODS: "Dict[str, AttributionFn]", REPO_ROOT):
 
 if __name__ == "__main__":
     app.run()
-
