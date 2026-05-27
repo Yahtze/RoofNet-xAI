@@ -38,7 +38,7 @@ def _(mo):
     From the repo root, launch with:
 
     ```bash
-    .venv/bin/marimo edit xAI_notebooks/remoteclip_xai_attribution_scaffold_marimo.py
+    .venv/bin/marimo edit xAI_notebooks/remoteclip_xai_attribution_marimo.py
     ```
 
     The next cell installs missing notebook-only packages into that same venv by calling `sys.executable -m pip`.
@@ -98,6 +98,7 @@ def _():
     import matplotlib.pyplot as plt
 
     import captum_gradcam
+    import captum_integrated_gradients
     from transformer_explainability import transformer_explainability
 
     try:
@@ -152,6 +153,7 @@ def _():
         REPO_ROOT,
         Tuple,
         captum_gradcam,
+        captum_integrated_gradients,
         dataclass,
         kagglehub,
         nn,
@@ -589,25 +591,70 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 10. Captum Integrated Gradients placeholder
+    ## 10. Captum Integrated Gradients
 
-    TODO: this is the simplest first implementation target because it attributes directly to input pixels.
+    Integrated Gradients variants:
+    - `captum_integrated_gradients_abs`: absolute channel-sum input attribution
+    - `captum_integrated_gradients_positive`: positive-only channel-sum input attribution
+
+    Both use a zero baseline, `n_steps=50`, and print Captum convergence delta.
     """)
     return
 
 
 @app.cell
-def _(IntegratedGradients, List, np, register_attribution, torch):
-    @register_attribution("captum_integrated_gradients")
-    def captum_integrated_gradients_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
+def _(
+    IntegratedGradients,
+    List,
+    captum_integrated_gradients,
+    model,
+    nn,
+    np,
+    register_attribution,
+    target_score_forward,
+    torch,
+):
+    class IntegratedGradientsTargetScoreModule(nn.Module):
+        def __init__(self, prompts: List[str], target_idx: int):
+            super().__init__()
+            self.prompts = prompts
+            self.target_idx = target_idx
+
+        def forward(self, image_tensor: torch.Tensor) -> torch.Tensor:
+            return target_score_forward(image_tensor, self.target_idx, self.prompts)
+
+    def _integrated_gradients_attr(
+        image_tensor: torch.Tensor,
+        target_idx: int,
+        prompts: List[str],
+        *,
+        reduction: str,
+    ) -> np.ndarray:
         if IntegratedGradients is None:
             raise ImportError("Install captum: pip install captum")
-        raise NotImplementedError(
-            "TODO: implement IntegratedGradients(TargetScoreModule(prompts, target_idx)). "
-            "Use zero or blurred baseline, n_steps config, then tensor_attr_to_heatmap(attr)."
-        )
+        score_module = IntegratedGradientsTargetScoreModule(prompts, target_idx)
+        model.zero_grad(set_to_none=True)
+        try:
+            return captum_integrated_gradients.integrated_gradients_heatmap(
+                score_forward=score_module,
+                image_tensor=image_tensor,
+                integrated_gradients_cls=IntegratedGradients,
+                reduction=reduction,
+                n_steps=50,
+            )
+        finally:
+            model.zero_grad(set_to_none=True)
 
-    return
+    @register_attribution("captum_integrated_gradients_abs")
+    def captum_integrated_gradients_abs_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
+        return _integrated_gradients_attr(image_tensor, target_idx, prompts, reduction="abs")
+
+    @register_attribution("captum_integrated_gradients_positive")
+    def captum_integrated_gradients_positive_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
+        return _integrated_gradients_attr(image_tensor, target_idx, prompts, reduction="positive")
+
+    CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED = True
+    return (CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,)
 
 
 @app.cell(hide_code=True)
@@ -622,6 +669,7 @@ def _(mo):
 def _(
     ATTRIBUTION_METHODS: "Dict[str, AttributionFn]",
     CAPTUM_GRADCAM_METHODS_REGISTERED,
+    CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
     MATERIAL_CLASSES,
     TRANSFORMER_EXPLAINABILITY_REGISTERED,
     image_tensor,
@@ -631,7 +679,11 @@ def _(
     show_attribution,
     topk,
 ):
-    _ = (CAPTUM_GRADCAM_METHODS_REGISTERED, TRANSFORMER_EXPLAINABILITY_REGISTERED)
+    _ = (
+        CAPTUM_GRADCAM_METHODS_REGISTERED,
+        CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
+        TRANSFORMER_EXPLAINABILITY_REGISTERED,
+    )
 
     def run_attribution_method(method_name: str) -> None:
         target_idx = int(topk.indices[0].item())
@@ -687,6 +739,34 @@ def _(mo):
 @app.cell
 def _(run_attribution_method):
     run_attribution_method("captum_gradcam_patch_embed")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Run Integrated Gradients absolute channel sum
+    """)
+    return
+
+
+@app.cell
+def _(run_attribution_method):
+    run_attribution_method("captum_integrated_gradients_abs")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Run Integrated Gradients positive-only channel sum
+    """)
+    return
+
+
+@app.cell
+def _(run_attribution_method):
+    run_attribution_method("captum_integrated_gradients_positive")
     return
 
 

@@ -16,3 +16,6 @@ test/
 
 # === OS artifacts ===
 .DS_Store
+
+# === Tooling artifacts ===
+.antigravitycli/

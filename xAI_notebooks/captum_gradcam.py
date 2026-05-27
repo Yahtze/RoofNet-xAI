@@ -52,7 +52,7 @@ def normalize_heatmap(heatmap: torch.Tensor, eps: float = 1e-8) -> np.ndarray:
     if float(denom) <= eps:
         _warn_and_print("GradCAM heatmap is constant after normalization; returning zero heatmap.")
         return torch.zeros_like(heatmap).numpy().astype(np.float32)
-    heatmap = heatmap / (denom + eps)
+    heatmap = heatmap / denom
     return heatmap.numpy().astype(np.float32)
 
 
