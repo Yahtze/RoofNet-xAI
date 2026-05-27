@@ -97,10 +97,10 @@ def _():
     from torchvision import transforms
     import matplotlib.pyplot as plt
 
-    import captum_gradcam
-    import captum_integrated_gradients
-    import rise
-    from transformer_explainability import transformer_explainability
+    from attribution_helpers import captum_gradcam
+    from attribution_helpers import captum_integrated_gradients
+    from attribution_helpers import rise
+    from attribution_helpers.transformer_explainability import transformer_explainability
 
     try:
         import open_clip
