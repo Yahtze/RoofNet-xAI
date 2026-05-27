@@ -1,4 +1,12 @@
+# === Model/Data artifacts (local only) ===
 best_clip_model_balanced.pth
 croissant_rai_RoofNet-Kaggle.json
 roofnet_metadata.csv
 xBD_cropped_roofs/
+
+# === Local notebooks/experiments ===
+xAI_notebooks/
+
+# === Repo policy ignores ===
+docs/
+AGENTS.md
