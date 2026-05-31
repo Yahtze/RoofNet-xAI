@@ -1,0 +1,21 @@
+# === Model/Data artifacts (local only) ===
+best_clip_model_balanced.pth
+croissant_rai_RoofNet-Kaggle.json
+roofnet_metadata.csv
+xBD_cropped_roofs/
+
+# === Local cache/runtime artifacts ===
+__pycache__/
+*.py[cod]
+__marimo__/
+
+# === Repo policy ignores ===
+docs/
+AGENTS.md
+test/
+
+# === OS artifacts ===
+.DS_Store
+
+# === Tooling artifacts ===
+.antigravitycli/
