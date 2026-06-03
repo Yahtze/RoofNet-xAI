@@ -254,6 +254,7 @@ def transformer_explainability(
     prompts: Sequence[str],
     target_idx: int,
     image_size: Tuple[int, int] = (224, 224),
+    verbose: bool = True,
 ) -> np.ndarray:
     patch_grid_size = get_visual_patch_grid_size(model)
     expected_token_count = 1 + patch_grid_size * patch_grid_size
@@ -265,22 +266,25 @@ def transformer_explainability(
     try:
         with torch.enable_grad():
             score = compute_similarity_score(model, tokenizer, image_for_grad, prompts, target_idx)
-            print(f"Transformer explainability target logit: {float(score.detach()):.6g}")
+            if verbose:
+                print(f"Transformer explainability target logit: {float(score.detach()):.6g}")
             score.backward()
         attention_gradient_pairs = session.ordered_attention_and_gradients()
         grad_abs_max = max(float(gradient.abs().max()) for _, gradient in attention_gradient_pairs)
         grad_abs_mean = sum(float(gradient.abs().mean()) for _, gradient in attention_gradient_pairs) / len(attention_gradient_pairs)
-        print(
-            "Transformer explainability gradient stats: "
-            f"layers={len(attention_gradient_pairs)}, abs_max={grad_abs_max:.6g}, abs_mean={grad_abs_mean:.6g}"
-        )
+        if verbose:
+            print(
+                "Transformer explainability gradient stats: "
+                f"layers={len(attention_gradient_pairs)}, abs_max={grad_abs_max:.6g}, abs_mean={grad_abs_mean:.6g}"
+            )
         layer_relevances = collect_layer_relevances(attention_gradient_pairs)
         patch_relevance = rollout_cls_patch_relevance(layer_relevances)
-        print(
-            "Transformer explainability patch relevance stats before normalization: "
-            f"min={float(patch_relevance.min()):.6g}, max={float(patch_relevance.max()):.6g}, "
-            f"abs_max={float(patch_relevance.abs().max()):.6g}"
-        )
+        if verbose:
+            print(
+                "Transformer explainability patch relevance stats before normalization: "
+                f"min={float(patch_relevance.min()):.6g}, max={float(patch_relevance.max()):.6g}, "
+                f"abs_max={float(patch_relevance.abs().max()):.6g}"
+            )
         if patch_relevance.numel() != expected_token_count - 1:
             raise ValueError(
                 f"Expected {expected_token_count - 1} patch tokens from visual transformer, got {patch_relevance.numel()}"

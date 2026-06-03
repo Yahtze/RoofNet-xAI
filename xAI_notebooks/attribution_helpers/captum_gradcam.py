@@ -24,7 +24,9 @@ def _warn_and_print(message: str) -> None:
     print(f"WARNING: {message}")
 
 
-def _tensor_stats(name: str, tensor: torch.Tensor) -> None:
+def _tensor_stats(name: str, tensor: torch.Tensor, *, verbose: bool = True) -> None:
+    if not verbose:
+        return
     tensor = tensor.detach().float().cpu()
     print(
         f"{name}: shape={tuple(tensor.shape)}, min={float(tensor.min()):.6g}, "
@@ -56,18 +58,23 @@ def normalize_heatmap(heatmap: torch.Tensor, eps: float = 1e-8) -> np.ndarray:
     return heatmap.numpy().astype(np.float32)
 
 
-def spatial_attr_to_heatmap(attr: torch.Tensor, *, label: str = "GradCAM spatial attribution") -> np.ndarray:
+def spatial_attr_to_heatmap(
+    attr: torch.Tensor,
+    *,
+    label: str = "GradCAM spatial attribution",
+    verbose: bool = True,
+) -> np.ndarray:
     attr = attr.detach().float().cpu()
-    _tensor_stats(f"{label} raw Captum attribution", attr)
+    _tensor_stats(f"{label} raw Captum attribution", attr, verbose=verbose)
     if attr.ndim == 4:
         attr = attr[0]
     if attr.ndim == 3:
         attr = attr.mean(dim=0)
     if attr.ndim != 2:
         raise ValueError(f"Expected spatial attribution with 2, 3, or 4 dims, got shape {tuple(attr.shape)}")
-    _tensor_stats(f"{label} channel-reduced attribution before ReLU", attr)
+    _tensor_stats(f"{label} channel-reduced attribution before ReLU", attr, verbose=verbose)
     relu_attr = torch.relu(attr)
-    _tensor_stats(f"{label} attribution after ReLU before normalization", relu_attr)
+    _tensor_stats(f"{label} attribution after ReLU before normalization", relu_attr, verbose=verbose)
     return normalize_heatmap(attr)
 
 
@@ -123,6 +130,7 @@ def _attribute(
     layer_gradcam_cls: Type,
     attr_dim_summation: bool = True,
     label: str = "GradCAM",
+    verbose: bool = True,
 ) -> torch.Tensor:
     captured = {}
 
@@ -132,13 +140,15 @@ def _attribute(
         captured["activation"] = output
         if torch.is_tensor(output) and output.requires_grad:
             output.retain_grad()
-            print(f"{label} forward hook activation shape: {tuple(output.shape)}")
+            if verbose:
+                print(f"{label} forward hook activation shape: {tuple(output.shape)}")
         else:
             print(f"WARNING: {label} forward hook activation has no gradient-bearing tensor output")
 
     def wrapped_score_forward(inputs: torch.Tensor) -> torch.Tensor:
         score = score_forward(inputs)
-        print(f"{label} target logit: {float(score.detach()):.6g}")
+        if verbose:
+            print(f"{label} target logit: {float(score.detach()):.6g}")
         return score
 
     handle = layer.register_forward_hook(capture_activation)
@@ -150,15 +160,15 @@ def _attribute(
 
     activation = captured.get("activation")
     if torch.is_tensor(activation):
-        _tensor_stats(f"{label} captured activation", activation)
+        _tensor_stats(f"{label} captured activation", activation, verbose=verbose)
         if activation.grad is None:
             print(f"WARNING: {label} captured activation gradient is missing after backward")
         else:
-            _tensor_stats(f"{label} captured activation gradient", activation.grad)
+            _tensor_stats(f"{label} captured activation gradient", activation.grad, verbose=verbose)
     else:
         print(f"WARNING: {label} forward hook did not capture tensor activation")
 
-    _tensor_stats(f"{label} returned Captum attribution", attr)
+    _tensor_stats(f"{label} returned Captum attribution", attr, verbose=verbose)
     return attr
 
 
@@ -168,6 +178,7 @@ def patch_embed_gradcam_heatmap(
     score_forward: Callable[[torch.Tensor], torch.Tensor],
     image_tensor: torch.Tensor,
     layer_gradcam_cls: Type,
+    verbose: bool = True,
 ) -> np.ndarray:
     attr = _attribute(
         score_forward=score_forward,
@@ -175,8 +186,9 @@ def patch_embed_gradcam_heatmap(
         layer=model.visual.conv1,
         layer_gradcam_cls=layer_gradcam_cls,
         label="Captum patch-embed GradCAM",
+        verbose=verbose,
     )
-    return spatial_attr_to_heatmap(attr, label="Captum patch-embed GradCAM")
+    return spatial_attr_to_heatmap(attr, label="Captum patch-embed GradCAM", verbose=verbose)
 
 
 def manual_token_gradcam_heatmap(
@@ -186,6 +198,7 @@ def manual_token_gradcam_heatmap(
     image_tensor: torch.Tensor,
     layer: torch.nn.Module,
     grid_size: Tuple[int, int],
+    verbose: bool = True,
 ) -> np.ndarray:
     captured = {}
 
@@ -235,15 +248,18 @@ def vit_token_gradcam_heatmap(
     image_tensor: torch.Tensor,
     layer_gradcam_cls: Type,
     layer_index: int = -2,
+    verbose: bool = True,
 ) -> np.ndarray:
     _ = layer_gradcam_cls
     layer = model.visual.transformer.resblocks[layer_index]
     grid_size = _grid_size(model)
-    print("ViT-token GradCAM using manual token GradCAM path by default for ViT token outputs.")
+    if verbose:
+        print("ViT-token GradCAM using manual token GradCAM path by default for ViT token outputs.")
     return manual_token_gradcam_heatmap(
         model=model,
         score_forward=score_forward,
         image_tensor=image_tensor,
         layer=layer,
         grid_size=grid_size,
+        verbose=verbose,
     )

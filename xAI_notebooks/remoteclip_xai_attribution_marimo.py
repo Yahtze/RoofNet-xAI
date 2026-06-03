@@ -702,7 +702,13 @@ def _(
     transformer_explainability,
 ):
     @register_attribution("transformer_explainability")
-    def transformer_explainability_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
+    def transformer_explainability_attr(
+        image_tensor: torch.Tensor,
+        target_idx: int,
+        prompts: List[str],
+        *,
+        verbose: bool = True,
+    ) -> np.ndarray:
         return transformer_explainability(
             model=model,
             tokenizer=tokenizer,
@@ -710,6 +716,7 @@ def _(
             prompts=prompts,
             target_idx=target_idx,
             image_size=CONFIG.preprocess.image_size,
+            verbose=verbose,
         )
 
     TRANSFORMER_EXPLAINABILITY_REGISTERED = True
@@ -761,7 +768,13 @@ def _(
                 print(name, "->", module.__class__.__name__)
 
     @register_attribution("vit_token_gradcam")
-    def vit_token_gradcam_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
+    def vit_token_gradcam_attr(
+        image_tensor: torch.Tensor,
+        target_idx: int,
+        prompts: List[str],
+        *,
+        verbose: bool = True,
+    ) -> np.ndarray:
         if LayerGradCam is None:
             raise ImportError("Install captum: pip install captum")
         score_module = TargetScoreModule(prompts, target_idx)
@@ -772,12 +785,19 @@ def _(
                 score_forward=score_module,
                 image_tensor=image_tensor,
                 layer_gradcam_cls=LayerGradCam,
+                verbose=verbose,
             )
         finally:
             model.zero_grad(set_to_none=True)
 
     @register_attribution("captum_gradcam_patch_embed")
-    def captum_gradcam_patch_embed_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
+    def captum_gradcam_patch_embed_attr(
+        image_tensor: torch.Tensor,
+        target_idx: int,
+        prompts: List[str],
+        *,
+        verbose: bool = True,
+    ) -> np.ndarray:
         if LayerGradCam is None:
             raise ImportError("Install captum: pip install captum")
         score_module = TargetScoreModule(prompts, target_idx)
@@ -788,6 +808,7 @@ def _(
                 score_forward=score_module,
                 image_tensor=image_tensor,
                 layer_gradcam_cls=LayerGradCam,
+                verbose=verbose,
             )
         finally:
             model.zero_grad(set_to_none=True)
@@ -842,6 +863,7 @@ def _(
         prompts: List[str],
         *,
         reduction: str,
+        verbose: bool = True,
     ) -> np.ndarray:
         if IntegratedGradients is None:
             raise ImportError("Install captum: pip install captum")
@@ -854,17 +876,30 @@ def _(
                 integrated_gradients_cls=IntegratedGradients,
                 reduction=reduction,
                 n_steps=CONFIG.integrated_gradients.n_steps,
+                verbose=verbose,
             )
         finally:
             model.zero_grad(set_to_none=True)
 
     @register_attribution("captum_integrated_gradients_abs")
-    def captum_integrated_gradients_abs_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
-        return _integrated_gradients_attr(image_tensor, target_idx, prompts, reduction="abs")
+    def captum_integrated_gradients_abs_attr(
+        image_tensor: torch.Tensor,
+        target_idx: int,
+        prompts: List[str],
+        *,
+        verbose: bool = True,
+    ) -> np.ndarray:
+        return _integrated_gradients_attr(image_tensor, target_idx, prompts, reduction="abs", verbose=verbose)
 
     @register_attribution("captum_integrated_gradients_positive")
-    def captum_integrated_gradients_positive_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
-        return _integrated_gradients_attr(image_tensor, target_idx, prompts, reduction="positive")
+    def captum_integrated_gradients_positive_attr(
+        image_tensor: torch.Tensor,
+        target_idx: int,
+        prompts: List[str],
+        *,
+        verbose: bool = True,
+    ) -> np.ndarray:
+        return _integrated_gradients_attr(image_tensor, target_idx, prompts, reduction="positive", verbose=verbose)
 
     CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED = True
     return (CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,)
@@ -895,7 +930,13 @@ def _(CONFIG, List, model, np, register_attribution, rise, tokenizer, torch):
         return image_features @ text_features.T[:, target_idx]
 
     @register_attribution("rise_raw_image")
-    def rise_raw_image_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
+    def rise_raw_image_attr(
+        image_tensor: torch.Tensor,
+        target_idx: int,
+        prompts: List[str],
+        *,
+        verbose: bool = True,
+    ) -> np.ndarray:
         generator_device = image_tensor.device if image_tensor.device.type != "mps" else "cpu"
         generator = torch.Generator(device=generator_device).manual_seed(CONFIG.seed)
         model.eval()
@@ -909,6 +950,7 @@ def _(CONFIG, List, model, np, register_attribution, rise, tokenizer, torch):
             mask_device=image_tensor.device,
             return_diagnostics=CONFIG.rise.return_diagnostics,
             generator=generator,
+            verbose=verbose,
         )[0]
 
     RISE_METHODS_REGISTERED = True
@@ -1086,8 +1128,12 @@ def _(mo):
 @app.cell
 def _(
     ATTRIBUTION_METHODS: "Dict[str, AttributionFn]",
+    CAPTUM_GRADCAM_METHODS_REGISTERED,
+    CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
     CONFIG,
     MATERIAL_CLASSES,
+    RISE_METHODS_REGISTERED,
+    TRANSFORMER_EXPLAINABILITY_REGISTERED,
     build_prompts,
     extract_city_name_from_filename,
     images,
@@ -1098,6 +1144,13 @@ def _(
     show_attribution,
     torch,
 ):
+    _ = (
+        CAPTUM_GRADCAM_METHODS_REGISTERED,
+        CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
+        RISE_METHODS_REGISTERED,
+        TRANSFORMER_EXPLAINABILITY_REGISTERED,
+    )
+
     def run_batch_attribution_visualizations() -> dict:
         CONFIG.batch.output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1151,6 +1204,7 @@ def _(
                             batch_image_tensor,
                             batch_target_idx,
                             batch_prompts,
+                            verbose=False,
                         )
                         batch_fig = show_attribution(
                             batch_pil_img,
