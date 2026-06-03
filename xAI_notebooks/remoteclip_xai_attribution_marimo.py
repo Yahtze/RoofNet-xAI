@@ -16,14 +16,30 @@ def _(mo):
     mo.md(r"""
     # RemoteCLIP Roof Material XAI Attribution Scaffold
 
-    Plug-and-play notebook scaffold for feature attribution on the fine-tuned RemoteCLIP ViT-L/14 roof-material classifier.
+    Plug-and-play marimo notebook for feature attribution on fine-tuned RemoteCLIP ViT-L/14 roof-material classifier.
 
-    Supported hooks planned:
+    Supported attribution families in this notebook:
     - Transformer Explainability
     - Captum LayerGradCAM / GradCAM-style attribution
     - Captum Integrated Gradients
+    - RISE black-box masking attribution
 
-    > This notebook is intentionally a scaffold: model loading, asset resolution, inference, visualization, and Transformer Explainability are runnable; Captum-based attribution methods remain to be filled in next.
+    How notebook is organized:
+    1. environment and imports
+    2. labels, prompts, and preprocessing
+    3. asset resolution and model loading
+    4. image sampling and prediction sanity check
+    5. attribution method registration and visualization
+    6. one output block per attribution method
+
+    Each result section aims to answer two questions:
+    - **what class did model predict?**
+    - **which image regions most supported that prediction?**
+
+    Read output panels as:
+    - **left:** original roof image
+    - **middle:** normalized attribution heatmap by itself
+    - **right:** attribution heatmap overlaid on input image
     """)
     return
 
@@ -33,15 +49,21 @@ def _(mo):
     mo.md(r"""
     ## 0. Project venv and optional dependencies
 
-    This marimo notebook is intended to run from the project venv at `../.venv`.
+    **What this section does:** makes sure notebook runs from project virtual environment and can self-install notebook-only dependencies if imports are missing.
 
-    From the repo root, launch with:
+    This marimo notebook is intended to run from project venv at `../.venv`.
+
+    From repo root, launch with:
 
     ```bash
     .venv/bin/marimo edit xAI_notebooks/remoteclip_xai_attribution_marimo.py
     ```
 
-    The next cell installs missing notebook-only packages into that same venv by calling `sys.executable -m pip`.
+    **Expected output:** next cell prints either:
+    - missing packages being installed into `sys.executable`, or
+    - confirmation that all required notebook packages already import cleanly.
+
+    If install step runs, rerunning cell later should usually print clean "already installed" status.
     """)
     return
 
@@ -77,7 +99,11 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 1. Imports and global config
+    ## 1. Imports and notebook config
+
+    **What this section does:** imports core libraries, then defines one centralized typed config block used by all later cells.
+
+    **Expected output:** device selection and inferred repository root. Config cell below then exposes all main notebook knobs in one place for interactive editing.
     """)
     return
 
@@ -120,39 +146,19 @@ def _():
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     REPO_ROOT = Path.cwd().resolve().parent if Path.cwd().name == "xAI_notebooks" else Path.cwd().resolve()
 
-    ASSET_MODE = "local"  # options: "local", "kagglehub"
-    KAGGLE_DATASET = "doubleblindreview/xbd-roof-images"
-
-    LOCAL_MODEL_WEIGHTS = REPO_ROOT / "best_clip_model_balanced.pth"
-    LOCAL_IMAGE_DIR = REPO_ROOT / "xBD_cropped_roofs" / "xBD_cropped_roofs"
-    LOCAL_METADATA_CSV = REPO_ROOT / "roofnet_metadata.csv"
-
-    IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
-    SEED = 42
-    random.seed(SEED)
-    np.random.seed(SEED)
-    torch.manual_seed(SEED)
-
     print(f"Device: {DEVICE}")
     print(f"Repo root: {REPO_ROOT}")
     return (
-        ASSET_MODE,
         Callable,
         DEVICE,
         Dict,
-        IMAGE_EXTS,
         Image,
         IntegratedGradients,
-        KAGGLE_DATASET,
-        LOCAL_IMAGE_DIR,
-        LOCAL_METADATA_CSV,
-        LOCAL_MODEL_WEIGHTS,
         LayerGradCam,
         List,
         Optional,
         Path,
         REPO_ROOT,
-        SEED,
         Tuple,
         captum_gradcam,
         captum_integrated_gradients,
@@ -173,13 +179,159 @@ def _():
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 2. Labels, prompts, and preprocessing
+    ## 2. Centralized notebook config
+
+    **What this section does:** collects main notebook settings into one typed config object with grouped sections for assets, preprocessing, visualization, attribution, and batch defaults.
+
+    **How to use it:** edit values in this cell, then rerun dependent cells. Notebook is designed so most routine experimentation should start here.
     """)
     return
 
 
 @app.cell
-def _(List, Path, torch, transforms):
+def _(Path, REPO_ROOT, dataclass):
+    @dataclass(frozen=True)
+    class AssetConfig:
+        # =========================
+        # Asset source selection
+        # =========================
+        asset_mode: str  # "local" or "kagglehub"
+        kaggle_dataset: str  # KaggleHub dataset slug used when asset_mode="kagglehub"
+        local_model_weights: Path  # Local checkpoint path for fine-tuned RemoteCLIP weights
+        local_image_dir: Path  # Local directory containing cropped roof images
+        local_metadata_csv: Path  # Optional local metadata CSV path
+        image_exts: tuple[str, ...]  # File suffixes treated as valid image assets
+
+    @dataclass(frozen=True)
+    class PreprocessConfig:
+        # =========================
+        # Image preprocessing
+        # =========================
+        image_size: tuple[int, int]  # Input resolution expected by RemoteCLIP
+        clip_mean: tuple[float, float, float]  # CLIP channel means for normalization
+        clip_std: tuple[float, float, float]  # CLIP channel stds for normalization
+
+    @dataclass(frozen=True)
+    class VisualizationConfig:
+        # =========================
+        # Attribution figure display
+        # =========================
+        overlay_alpha: float  # Transparency for overlay panel
+        cmap: str  # Matplotlib colormap for attribution heatmaps
+        figure_size: tuple[int, int]  # Figure size for three-panel attribution plots
+        preview_figure_size: tuple[int, int]  # Figure size for sampled input image preview
+
+    @dataclass(frozen=True)
+    class IntegratedGradientsConfig:
+        # =========================
+        # Integrated Gradients
+        # =========================
+        n_steps: int  # Number of integration steps for Captum IG
+
+    @dataclass(frozen=True)
+    class RiseConfig:
+        # =========================
+        # RISE black-box attribution
+        # =========================
+        num_masks: int  # Number of random masks to sample
+        mask_grid_size: int  # Low-resolution grid size before upsampling masks
+        p_save: float  # Probability each mask cell stays visible
+        batch_size: int  # Number of masked images scored per forward chunk
+        return_diagnostics: bool  # Print runtime/sampling diagnostics during notebook runs
+
+    @dataclass(frozen=True)
+    class BatchConfig:
+        # =========================
+        # Future batch runner defaults
+        # =========================
+        num_images: int  # Placeholder count for future batch processing
+        target: str  # Attribution target policy for future batch runs
+        output_dir: Path  # Directory where future batch outputs should be written
+
+    @dataclass(frozen=True)
+    class NotebookConfig:
+        # =========================
+        # Root notebook config
+        # =========================
+        seed: int  # Global seed for Python/numpy/torch and stochastic methods
+        model_name: str  # OpenCLIP model architecture name
+        pretrained_weights: str  # Base pretrained weights used before fine-tuned checkpoint load
+        assets: AssetConfig
+        preprocess: PreprocessConfig
+        visualization: VisualizationConfig
+        integrated_gradients: IntegratedGradientsConfig
+        rise: RiseConfig
+        batch: BatchConfig
+
+    CONFIG = NotebookConfig(
+        seed=42,
+        model_name="ViT-L-14",
+        pretrained_weights="laion2b_s32b_b82k",
+        assets=AssetConfig(
+            asset_mode="local",
+            kaggle_dataset="doubleblindreview/xbd-roof-images",
+            local_model_weights=REPO_ROOT / "best_clip_model_balanced.pth",
+            local_image_dir=REPO_ROOT / "xBD_cropped_roofs" / "xBD_cropped_roofs",
+            local_metadata_csv=REPO_ROOT / "roofnet_metadata.csv",
+            image_exts=(".jpg", ".jpeg", ".png", ".webp"),
+        ),
+        preprocess=PreprocessConfig(
+            image_size=(224, 224),
+            clip_mean=(0.48145466, 0.4578275, 0.40821073),
+            clip_std=(0.26862954, 0.26130258, 0.27577711),
+        ),
+        visualization=VisualizationConfig(
+            overlay_alpha=0.45,
+            cmap="inferno",
+            figure_size=(12, 4),
+            preview_figure_size=(4, 4),
+        ),
+        integrated_gradients=IntegratedGradientsConfig(
+            n_steps=50,
+        ),
+        rise=RiseConfig(
+            num_masks=512,
+            mask_grid_size=12,
+            p_save=0.5,
+            batch_size=32,
+            return_diagnostics=True,
+        ),
+        batch=BatchConfig(
+            num_images=8,
+            target="predicted_top1",
+            output_dir=REPO_ROOT / "xAI_outputs",
+        ),
+    )
+
+    CONFIG
+    return (CONFIG,)
+
+
+@app.cell
+def _(CONFIG, np, random, torch):
+    random.seed(CONFIG.seed)
+    np.random.seed(CONFIG.seed)
+    torch.manual_seed(CONFIG.seed)
+    print(f"Seeded python/numpy/torch with CONFIG.seed={CONFIG.seed}")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 3. Labels, prompts, and preprocessing
+
+    **What this section does:** defines roof-material label set, derives city-conditioned text prompts from filenames, and builds CLIP-compatible image preprocessing.
+
+    **Why this matters:** classifier prediction is not plain image-only classification; image is compared against text prompts like `{material} in {city_name}`. Small changes here affect every prediction and attribution result downstream.
+
+    **Expected output:** no rich display yet; this block mainly prepares reusable functions and constants for later cells.
+    """)
+    return
+
+
+@app.cell
+def _(CONFIG, List, Path, torch, transforms):
     MATERIAL_CLASSES = [
         "Thatch", "StoneSlates", "ClayTiles", "AsphaltTiles",
         "ConcreteTiles", "WoodTiles", "MetalSheetMaterials", "PolycarbonateSheetMaterials",
@@ -204,15 +356,15 @@ def _(List, Path, torch, transforms):
         return [f"{material} in {city_name}" for material in MATERIAL_CLASSES]
 
     preprocess = transforms.Compose([
-        transforms.Resize((224, 224)),
+        transforms.Resize(CONFIG.preprocess.image_size),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
-                             std=[0.26862954, 0.26130258, 0.27577711]),
+        transforms.Normalize(mean=list(CONFIG.preprocess.clip_mean),
+                             std=list(CONFIG.preprocess.clip_std)),
     ])
 
     def denormalize_clip_tensor(x: torch.Tensor) -> torch.Tensor:
-        mean = torch.tensor([0.48145466, 0.4578275, 0.40821073], device=x.device).view(3, 1, 1)
-        std = torch.tensor([0.26862954, 0.26130258, 0.27577711], device=x.device).view(3, 1, 1)
+        mean = torch.tensor(CONFIG.preprocess.clip_mean, device=x.device).view(3, 1, 1)
+        std = torch.tensor(CONFIG.preprocess.clip_std, device=x.device).view(3, 1, 1)
         return (x * std + mean).clamp(0, 1)
 
     return (
@@ -226,26 +378,21 @@ def _(List, Path, torch, transforms):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 3. Asset resolver: local or KaggleHub
+    ## 4. Asset resolver: local or KaggleHub
+
+    **What this section does:** resolves where notebook should find model weights, image directory, and optional metadata.
+
+    Use this section when switching between:
+    - **local mode:** assets already present inside repo/workstation layout
+    - **KaggleHub mode:** assets downloaded on demand from dataset mirror
+
+    **Expected output:** resolved filesystem paths plus small diagnostics showing which asset source was selected. If this section fails, later model-loading and inference cells will also fail.
     """)
     return
 
 
 @app.cell
-def _(
-    ASSET_MODE,
-    IMAGE_EXTS,
-    KAGGLE_DATASET,
-    LOCAL_IMAGE_DIR,
-    LOCAL_METADATA_CSV,
-    LOCAL_MODEL_WEIGHTS,
-    List,
-    Optional,
-    Path,
-    REPO_ROOT,
-    dataclass,
-    kagglehub,
-):
+def _(CONFIG, List, Optional, Path, REPO_ROOT, dataclass, kagglehub):
     @dataclass
     class AssetPaths:
         root: Path
@@ -260,18 +407,18 @@ def _(
                 return matches[0]
         return None
 
-    def resolve_assets(asset_mode: str = ASSET_MODE) -> AssetPaths:
+    def resolve_assets(asset_mode: str = CONFIG.assets.asset_mode) -> AssetPaths:
         if asset_mode == "local":
             assets = AssetPaths(
                 root=REPO_ROOT,
-                model_weights=LOCAL_MODEL_WEIGHTS,
-                image_dir=LOCAL_IMAGE_DIR,
-                metadata_csv=LOCAL_METADATA_CSV if LOCAL_METADATA_CSV.exists() else None,
+                model_weights=CONFIG.assets.local_model_weights,
+                image_dir=CONFIG.assets.local_image_dir,
+                metadata_csv=CONFIG.assets.local_metadata_csv if CONFIG.assets.local_metadata_csv.exists() else None,
             )
         elif asset_mode == "kagglehub":
             if kagglehub is None:
                 raise ImportError("Install kagglehub: pip install kagglehub")
-            kaggle_root = Path(kagglehub.dataset_download(KAGGLE_DATASET)).resolve()
+            kaggle_root = Path(kagglehub.dataset_download(CONFIG.assets.kaggle_dataset)).resolve()
             print("Path to dataset files:", kaggle_root)
             model_weights = _find_first(kaggle_root, ["best_clip_model_balanced.pth", "*.pth"])
             image_dir = _find_first(kaggle_root, ["xBD_cropped_roofs", "*cropped*roofs*"])
@@ -280,7 +427,7 @@ def _(
                 raise FileNotFoundError(f"Could not find .pth weights under {kaggle_root}")
             if image_dir is None or not image_dir.is_dir():
                 # fallback: use parent directory of first image
-                first_image = next((p for p in kaggle_root.rglob("*") if p.suffix.lower() in IMAGE_EXTS), None)
+                first_image = next((p for p in kaggle_root.rglob("*") if p.suffix.lower() in CONFIG.assets.image_exts), None)
                 if first_image is None:
                     raise FileNotFoundError(f"Could not find image files under {kaggle_root}")
                 image_dir = first_image.parent
@@ -294,7 +441,7 @@ def _(
             raise FileNotFoundError(f"Missing image directory: {assets.image_dir}")
         return assets
 
-    assets = resolve_assets(ASSET_MODE)
+    assets = resolve_assets(CONFIG.assets.asset_mode)
     assets
     return (assets,)
 
@@ -302,19 +449,23 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 4. Load fine-tuned RemoteCLIP
+    ## 5. Load fine-tuned RemoteCLIP
+
+    **What this section does:** instantiates base RemoteCLIP ViT-L/14 architecture, loads fine-tuned roof-material checkpoint, moves model to active device, and fetches matching tokenizer.
+
+    **Expected output:** path to weight file that was loaded. This is important provenance signal: attribution is only meaningful if notebook is pointing at intended checkpoint.
     """)
     return
 
 
 @app.cell
-def _(DEVICE, Path, assets, open_clip, torch):
+def _(CONFIG, DEVICE, Path, assets, open_clip, torch):
     def load_remoteclip_model(weights_path: Path, device: str = DEVICE):
-        model, _, _ = open_clip.create_model_and_transforms('ViT-L-14', pretrained='laion2b_s32b_b82k')
+        model, _, _ = open_clip.create_model_and_transforms(CONFIG.model_name, pretrained=CONFIG.pretrained_weights)
         state = torch.load(weights_path, map_location=device)
         model.load_state_dict(state)
         model.to(device).eval()
-        tokenizer = open_clip.get_tokenizer('ViT-L-14')
+        tokenizer = open_clip.get_tokenizer(CONFIG.model_name)
         return model, tokenizer
 
     model, tokenizer = load_remoteclip_model(assets.model_weights)
@@ -325,16 +476,27 @@ def _(DEVICE, Path, assets, open_clip, torch):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 5. Image selection and inference wrapper
+    ## 6. Image selection and inference wrapper
+
+    **What this section does:** finds candidate roof images, samples one example, preprocesses it, builds city-aware prompts, and runs top-k prediction sanity check.
+
+    **Expected output:**
+    - number of images discovered under active image directory
+    - sampled filename
+    - parsed city context
+    - top-5 class probabilities for sampled image
+    - displayed input image titled with top-1 predicted material
+
+    Treat this as main pre-attribution checkpoint. If predicted label or prompt context looks wrong here, attribution maps later may still render but answer wrong question.
     """)
     return
 
 
 @app.cell
 def _(
+    CONFIG,
     DEVICE,
     Dict,
-    IMAGE_EXTS,
     Image,
     List,
     MATERIAL_CLASSES,
@@ -352,7 +514,7 @@ def _(
     torch,
 ):
     def list_images(image_dir: Path, limit: Optional[int] = None) -> List[Path]:
-        paths = sorted(p for p in image_dir.rglob("*") if p.suffix.lower() in IMAGE_EXTS)
+        paths = sorted(p for p in image_dir.rglob("*") if p.suffix.lower() in CONFIG.assets.image_exts)
         return paths[:limit] if limit else paths
 
     def load_image_tensor(image_path: Path, device: str = DEVICE) -> Tuple[Image.Image, torch.Tensor]:
@@ -396,23 +558,41 @@ def _(
     for score, idx in zip(topk.values.tolist(), topk.indices.tolist()):
         print(f"{MATERIAL_CLASSES[idx]:>28s}: {score:.3f}")
 
-    plt.figure(figsize=(4, 4))
+    plt.figure(figsize=CONFIG.visualization.preview_figure_size)
     plt.imshow(pil_img)
     plt.axis("off")
     plt.title(MATERIAL_CLASSES[topk.indices[0].item()])
-    return image_tensor, pil_img, prompts, target_score_forward, topk
+    return (
+        image_tensor,
+        images,
+        load_image_tensor,
+        pil_img,
+        predict,
+        prompts,
+        target_score_forward,
+        topk,
+    )
 
 
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 6. Visualization helpers
+    ## 7. Visualization helpers
+
+    **What this section does:** standardizes how attribution arrays become viewable figures.
+
+    **How to read the figure:**
+    - **Input:** original RGB roof tile/crop
+    - **Attribution:** normalized heatmap only
+    - **Overlay:** heatmap placed on top of original image for spatial interpretation
+
+    Heatmaps are min-max normalized for display. Good for visual comparison within one run, but raw display intensity should not be over-interpreted as a calibrated score across unrelated methods or images.
     """)
     return
 
 
 @app.cell
-def _(Image, np, plt, torch):
+def _(CONFIG, Image, np, plt, torch):
     def normalize_attr(attr: np.ndarray, eps: float = 1e-8) -> np.ndarray:
         attr = np.asarray(attr, dtype=np.float32)
         raw_min = float(np.nanmin(attr))
@@ -428,11 +608,17 @@ def _(Image, np, plt, torch):
             return np.zeros_like(attr, dtype=np.float32)
         return attr / (denom + eps)
 
-    def show_attribution(image: Image.Image, heatmap: np.ndarray, title: str, alpha: float = 0.45, cmap: str = "inferno"):
+    def show_attribution(
+        image: Image.Image,
+        heatmap: np.ndarray,
+        title: str,
+        alpha: float = CONFIG.visualization.overlay_alpha,
+        cmap: str = CONFIG.visualization.cmap,
+    ):
         heatmap = normalize_attr(heatmap)
         resample = getattr(Image, "Resampling", Image).BILINEAR
         heatmap = np.asarray(Image.fromarray(heatmap).resize(image.size, resample=resample))
-        fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+        fig, axes = plt.subplots(1, 3, figsize=CONFIG.visualization.figure_size)
         axes[0].imshow(image); axes[0].set_title("Input"); axes[0].axis("off")
         axes[1].imshow(heatmap, cmap=cmap); axes[1].set_title("Attribution"); axes[1].axis("off")
         axes[2].imshow(image); axes[2].imshow(heatmap, cmap=cmap, alpha=alpha); axes[2].set_title(title); axes[2].axis("off")
@@ -455,7 +641,7 @@ def _(Image, np, plt, torch):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 7. Attribution method registry
+    ## 8. Attribution method registry
 
     Each method accepts `(image_tensor, target_idx, prompts)` and returns a 2D heatmap array. Add/replace methods without changing visualization code.
     """)
@@ -479,21 +665,29 @@ def _(Callable, Dict, List, np, torch):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 8. Transformer Explainability
+    ## 9. Transformer Explainability
 
-    Implemented for RemoteCLIP ViT-L/14.
+    **What this section does:** registers attention-based attribution method for RemoteCLIP ViT-L/14.
+
+    Intuition:
+    - inspect visual transformer attention at each layer
+    - weight attention by gradient signal from chosen target score
+    - roll relevance from CLS token back onto spatial patch grid
+
+    **Expected output later:** a 2D relevance map showing which patches most supported current top-1 image-text similarity score.
 
     Notes:
     - patches each visual transformer attention block to request `need_weights=True`
     - captures attention weights plus their gradients with respect to target image-text similarity
     - builds gradient-weighted per-layer relevance matrices
-    - rolls CLS relevance back onto the 16×16 patch grid, then upsamples to 224×224
+    - rolls CLS relevance back onto 16×16 patch grid, then upsamples to 224×224
     """)
     return
 
 
 @app.cell
 def _(
+    CONFIG,
     List,
     model,
     np,
@@ -510,7 +704,7 @@ def _(
             image_tensor=image_tensor,
             prompts=prompts,
             target_idx=target_idx,
-            image_size=(224, 224),
+            image_size=CONFIG.preprocess.image_size,
         )
 
     TRANSFORMER_EXPLAINABILITY_REGISTERED = True
@@ -520,11 +714,17 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 9. Captum GradCAM
+    ## 10. Captum GradCAM
+
+    **What this section does:** registers two GradCAM-style methods that probe different stages of visual encoder.
 
     Captum LayerGradCAM variants:
     - `captum_gradcam_vit_tokens`: last visual transformer block, CLS dropped, patch tokens reshaped to grid
     - `captum_gradcam_patch_embed`: raw patch projection layer `model.visual.conv1`
+
+    Interpretation guide:
+    - **ViT-token GradCAM:** later, more semantic focus after transformer processing
+    - **Patch-embed GradCAM:** earlier, lower-level spatial evidence near image-to-patch projection stage
     """)
     return
 
@@ -594,19 +794,24 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 10. Captum Integrated Gradients
+    ## 11. Captum Integrated Gradients
+
+    **What this section does:** registers input-space attribution methods based on path-integrated gradients from zero baseline to actual image tensor.
 
     Integrated Gradients variants:
     - `captum_integrated_gradients_abs`: absolute channel-sum input attribution
     - `captum_integrated_gradients_positive`: positive-only channel-sum input attribution
 
-    Both use a zero baseline, `n_steps=50`, and print Captum convergence delta.
+    Both use zero baseline, `n_steps=50`, and print Captum convergence delta.
+
+    **Expected output later:** heatmaps often look smoother than raw gradient methods. If absolute and positive variants look very similar, that usually means negative attribution mass was small for this sample.
     """)
     return
 
 
 @app.cell
 def _(
+    CONFIG,
     IntegratedGradients,
     List,
     captum_integrated_gradients,
@@ -643,7 +848,7 @@ def _(
                 image_tensor=image_tensor,
                 integrated_gradients_cls=IntegratedGradients,
                 reduction=reduction,
-                n_steps=50,
+                n_steps=CONFIG.integrated_gradients.n_steps,
             )
         finally:
             model.zero_grad(set_to_none=True)
@@ -663,24 +868,19 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 11. RISE raw-image black-box attribution
+    ## 12. RISE raw-image black-box attribution
+
+    **What this section does:** registers black-box attribution method that repeatedly masks image and measures how target score changes.
 
     `rise_raw_image` uses randomized input sampling with mean-baseline masks in CLIP-normalized tensor space. It runs many masked RemoteCLIP forwards in chunks, so expect it to be slower than gradient/attention methods.
+
+    **Expected output later:** spatial saliency map plus concise diagnostics about mask sampling and runtime. Good contrast against gradient-based methods because it does not rely on internal gradients through model layers.
     """)
     return
 
 
 @app.cell
-def _(
-    List,
-    SEED,
-    model,
-    np,
-    register_attribution,
-    rise,
-    tokenizer,
-    torch,
-):
+def _(CONFIG, List, model, np, register_attribution, rise, tokenizer, torch):
     def rise_unscaled_target_score(image_batch: torch.Tensor, target_idx: int, prompts: List[str]) -> torch.Tensor:
         tokenized = tokenizer(prompts).to(image_batch.device)
         image_features = model.encode_image(image_batch)
@@ -692,17 +892,17 @@ def _(
     @register_attribution("rise_raw_image")
     def rise_raw_image_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
         generator_device = image_tensor.device if image_tensor.device.type != "mps" else "cpu"
-        generator = torch.Generator(device=generator_device).manual_seed(SEED)
+        generator = torch.Generator(device=generator_device).manual_seed(CONFIG.seed)
         model.eval()
         return rise.rise_heatmap(
             score_forward=lambda masked_batch: rise_unscaled_target_score(masked_batch, target_idx, prompts),
             image_tensor=image_tensor,
-            num_masks=512,
-            mask_grid_size=12,
-            p_save=0.5,
-            batch_size=32,
+            num_masks=CONFIG.rise.num_masks,
+            mask_grid_size=CONFIG.rise.mask_grid_size,
+            p_save=CONFIG.rise.p_save,
+            batch_size=CONFIG.rise.batch_size,
             mask_device=image_tensor.device,
-            return_diagnostics=True,
+            return_diagnostics=CONFIG.rise.return_diagnostics,
             generator=generator,
         )[0]
 
@@ -713,7 +913,11 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 12. Run one attribution method
+    ## 13. Run one attribution method
+
+    **What this section does:** provides one shared runner that takes registered method name, computes heatmap for current top-1 class, and replaces cell output with standardized visualization figure.
+
+    Each method-specific block below reuses same sampled image, same prompt set, and same top-1 prediction target. That makes visual differences easier to attribute to explanation method rather than changed inputs.
     """)
     return
 
@@ -759,6 +963,8 @@ def _(
 def _(mo):
     mo.md(r"""
     ### Run Transformer Explainability
+
+    Use this output to inspect attention-derived relevance after information has flowed through full visual transformer stack. Expect broader semantic regions rather than very sharp pixel-level contours.
     """)
     return
 
@@ -773,6 +979,8 @@ def _(run_attribution_method):
 def _(mo):
     mo.md(r"""
     ### Run ViT-token GradCAM
+
+    This view asks which late transformer tokens most supported top-1 score. Compare against Transformer Explainability to see whether both methods highlight similar roof subregions.
     """)
     return
 
@@ -787,6 +995,8 @@ def _(run_attribution_method):
 def _(mo):
     mo.md(r"""
     ### Run patch-embed GradCAM
+
+    This view focuses earlier in encoder. Useful for checking whether coarse evidence already appears at patch projection stage or only emerges after transformer mixing.
     """)
     return
 
@@ -801,6 +1011,8 @@ def _(run_attribution_method):
 def _(mo):
     mo.md(r"""
     ### Run Integrated Gradients absolute channel sum
+
+    Absolute reduction treats both positive and negative channel contributions as magnitude. Good first view when you want total sensitivity regardless of sign.
     """)
     return
 
@@ -815,6 +1027,8 @@ def _(run_attribution_method):
 def _(mo):
     mo.md(r"""
     ### Run Integrated Gradients positive-only channel sum
+
+    Positive-only reduction suppresses negative evidence and keeps only features that increase target score. Compare this directly against absolute variant to judge whether inhibitory evidence mattered.
     """)
     return
 
@@ -830,7 +1044,11 @@ def _(mo):
     mo.md(r"""
     ### Run RISE raw-image black-box attribution
 
+    Black-box view: saliency comes from repeated masking experiments rather than backprop through internals.
+
     Slow path: generates 512 soft masks and runs RemoteCLIP in chunks. Increase `num_masks` to 1024–2000+ only for higher-quality offline/publication runs.
+
+    Expect this cell to take longer than earlier methods. Use it as robustness check when you want attribution that depends less on internal architectural assumptions.
     """)
     return
 
@@ -844,27 +1062,101 @@ def _(run_attribution_method):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 13. Batch/run config placeholder
+    ## 14. Batch attribution runner
 
-    TODO: iterate over selected images and methods, save overlays to `xAI_outputs/`.
-    Future task: add Batch Comparison Cell for selected methods/images with side-by-side outputs.
+    This section now runs batch export over a configurable slice of discovered images.
+
+    What it does:
+    - takes first `CONFIG.batch.num_images` discovered images
+    - runs all registered attribution methods
+    - groups saved figures into four family folders under `xAI_outputs/`
+    - prints per-image, per-method save diagnostics for research traceability
+
+    Output folders created:
+    - `xAI_outputs/transformer_explainability/`
+    - `xAI_outputs/captum_gradcam/`
+    - `xAI_outputs/captum_integrated_gradients/`
+    - `xAI_outputs/rise/`
     """)
     return
 
 
 @app.cell
-def _(ATTRIBUTION_METHODS: "Dict[str, AttributionFn]", REPO_ROOT):
-    OUTPUT_DIR = REPO_ROOT / "xAI_outputs"
-    OUTPUT_DIR.mkdir(exist_ok=True)
+def _(
+    ATTRIBUTION_METHODS: "Dict[str, AttributionFn]",
+    CONFIG,
+    MATERIAL_CLASSES,
+    build_prompts,
+    extract_city_name_from_filename,
+    images,
+    load_image_tensor,
+    predict,
+    show_attribution,
+    torch,
+):
+    CONFIG.batch.output_dir.mkdir(parents=True, exist_ok=True)
+
+    method_groups = {
+        "transformer_explainability": ["transformer_explainability"],
+        "captum_gradcam": [
+            "captum_gradcam_vit_tokens",
+            "captum_gradcam_patch_embed",
+        ],
+        "captum_integrated_gradients": [
+            "captum_integrated_gradients_abs",
+            "captum_integrated_gradients_positive",
+        ],
+        "rise": ["rise_raw_image"],
+    }
+
+    if CONFIG.batch.target != "predicted_top1":
+        raise NotImplementedError(
+            f"Batch runner currently supports only CONFIG.batch.target='predicted_top1', got {CONFIG.batch.target!r}"
+        )
+
+    selected_images = images[: CONFIG.batch.num_images]
+    if not selected_images:
+        raise ValueError("No images available for batch attribution run.")
+
+    saved_outputs = []
+    for family_name, family_methods in method_groups.items():
+        method_dir = CONFIG.batch.output_dir / family_name
+        method_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Ready batch output dir: {method_dir}")
+
+        for image_path in selected_images:
+            city_name = extract_city_name_from_filename(image_path.name)
+            prompts = build_prompts(city_name)
+            pil_img, image_tensor = load_image_tensor(image_path)
+
+            pred = predict(image_tensor, prompts)
+            target_idx = int(torch.argmax(pred["probs"]).item())
+            target_label = MATERIAL_CLASSES[target_idx]
+
+            for method_name in family_methods:
+                print(
+                    f"Batch attribution: image={image_path.name} | family={family_name} | "
+                    f"method={method_name} | target={target_label}"
+                )
+                heatmap = ATTRIBUTION_METHODS[method_name](image_tensor, target_idx, prompts)
+                fig = show_attribution(pil_img, heatmap, f"{method_name}: {target_label}")
+
+                output_stem = image_path.stem.replace(" ", "_")
+                output_path = method_dir / f"{output_stem}__{method_name}.png"
+                fig.savefig(output_path, bbox_inches="tight")
+                saved_outputs.append(str(output_path))
+                print(f"Saved batch attribution: {output_path}")
 
     BATCH_CONFIG = {
-        "num_images": 8,
-        "methods": list(ATTRIBUTION_METHODS.keys()),
-        "target": "predicted_top1",
-        "output_dir": str(OUTPUT_DIR),
+        "num_images": CONFIG.batch.num_images,
+        "selected_images": [path.name for path in selected_images],
+        "method_groups": method_groups,
+        "target": CONFIG.batch.target,
+        "output_dir": str(CONFIG.batch.output_dir),
+        "saved_outputs": saved_outputs,
     }
     BATCH_CONFIG
-    return
+    return image_tensor, pil_img, prompts
 
 
 if __name__ == "__main__":
