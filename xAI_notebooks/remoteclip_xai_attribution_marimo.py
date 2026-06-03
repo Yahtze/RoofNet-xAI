@@ -1067,21 +1067,18 @@ def _(run_attribution_method):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 14. Batch attribution runner
+    ## 14. Batch attribution visualizations
 
-    This section now runs batch export over a configurable slice of discovered images.
+    This cell mirrors earlier visualization runners, but loops across a batch of images.
 
     What it does:
     - takes first `CONFIG.batch.num_images` discovered images
     - runs all registered attribution methods
-    - groups saved figures into four family folders under `xAI_outputs/`
-    - prints per-image, per-method save diagnostics for research traceability
+    - saves rendered attribution figures under `xAI_outputs/`
 
-    Output folders created:
-    - `xAI_outputs/transformer_explainability/`
-    - `xAI_outputs/captum_gradcam/`
-    - `xAI_outputs/captum_integrated_gradients/`
-    - `xAI_outputs/rise/`
+    What it does not do:
+    - no aggregate statistics
+    - no summary plots
     """)
     return
 
@@ -1093,177 +1090,226 @@ def _(
     MATERIAL_CLASSES,
     build_prompts,
     extract_city_name_from_filename,
-    faa,
     images,
     load_image_tensor,
-    pd,
+    mo,
     plt,
     predict,
     show_attribution,
     torch,
 ):
-    CONFIG.batch.output_dir.mkdir(parents=True, exist_ok=True)
+    def run_batch_attribution_visualizations() -> dict:
+        CONFIG.batch.output_dir.mkdir(parents=True, exist_ok=True)
 
-    method_groups = {
-        "transformer_explainability": ["transformer_explainability"],
-        "captum_gradcam": [
-            "vit_token_gradcam",
-            "captum_gradcam_patch_embed",
-        ],
-        "captum_integrated_gradients": [
-            "captum_integrated_gradients_abs",
-            "captum_integrated_gradients_positive",
-        ],
-        "rise": ["rise_raw_image"],
-    }
-
-    if CONFIG.batch.target != "predicted_top1":
-        raise NotImplementedError(
-            f"Batch runner currently supports only CONFIG.batch.target='predicted_top1', got {CONFIG.batch.target!r}"
-        )
-
-    selected_images = images[: CONFIG.batch.num_images]
-    if not selected_images:
-        raise ValueError("No images available for batch attribution run.")
-
-    saved_outputs = []
-    transformer_spatial_stats = []
-    for family_name, family_methods in method_groups.items():
-        method_dir = CONFIG.batch.output_dir / family_name
-        method_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Ready batch output dir: {method_dir}")
-
-        for image_path in selected_images:
-            city_name = extract_city_name_from_filename(image_path.name)
-            prompts = build_prompts(city_name)
-            pil_img, image_tensor = load_image_tensor(image_path)
-
-            pred = predict(image_tensor, prompts)
-            target_idx = int(torch.argmax(pred["probs"]).item())
-            target_label = MATERIAL_CLASSES[target_idx]
-
-            for method_name in family_methods:
-                print(
-                    f"Batch attribution: image={image_path.name} | family={family_name} | "
-                    f"method={method_name} | target={target_label}"
-                )
-                heatmap = ATTRIBUTION_METHODS[method_name](image_tensor, target_idx, prompts)
-                fig = show_attribution(pil_img, heatmap, f"{method_name}: {target_label}")
-
-                output_stem = image_path.stem.replace(" ", "_")
-                output_path = method_dir / f"{output_stem}__{method_name}.png"
-                fig.savefig(output_path, bbox_inches="tight")
-                plt.close(fig)
-                saved_outputs.append(str(output_path))
-                print(f"Saved batch attribution: {output_path}")
-
-                if method_name == "transformer_explainability":
-                    spatial_stats = faa.compute_spatial_stats(
-                        heatmap,
-                        method=method_name,
-                        image_id=image_path.name,
-                    )
-                    spatial_stats["target_idx"] = target_idx
-                    spatial_stats["target_label"] = target_label
-                    spatial_stats["city_name"] = city_name
-                    transformer_spatial_stats.append(spatial_stats)
-                    print(
-                        "Transformer aggregation diagnostics: "
-                        f"image={image_path.name} | center25={spatial_stats['mass_center_25_square']:.4f} | "
-                        f"center50={spatial_stats['mass_center_50_square']:.4f} | "
-                        f"radius50_square={spatial_stats['radius_for_50_mass_square']:.4f} | "
-                        f"radius50_radial={spatial_stats['radius_for_50_mass_radial']:.4f} | "
-                        f"negative_mass_ratio={spatial_stats['negative_mass_ratio']:.4f} | "
-                        f"zero_sum={spatial_stats['is_zero_sum']}"
-                    )
-
-    aggregation_outputs = {}
-    if transformer_spatial_stats:
-        transformer_stats_df = pd.DataFrame(transformer_spatial_stats)
-        transformer_family_dir = CONFIG.batch.output_dir / "transformer_explainability"
-        stats_csv_path = transformer_family_dir / "transformer_spatial_stats.csv"
-        stats_parquet_path = transformer_family_dir / "transformer_spatial_stats.parquet"
-        summary_csv_path = transformer_family_dir / "transformer_spatial_summary.csv"
-        radial_profile_csv_path = transformer_family_dir / "transformer_radial_profile_summary.csv"
-        radial_profile_png_path = transformer_family_dir / "transformer_radial_profile.png"
-        center_mass_hist_png_path = transformer_family_dir / "transformer_center25_hist.png"
-        centroid_offset_hist_png_path = transformer_family_dir / "transformer_centroid_offset_hist.png"
-
-        transformer_stats_df.to_csv(stats_csv_path, index=False)
-        transformer_stats_df.to_parquet(stats_parquet_path, index=False)
-
-        aggregate = faa.aggregate_spatial_stats(transformer_stats_df)
-        summary_df = pd.DataFrame([aggregate["summary"]])
-        radial_profile_df = aggregate["radial_profile"]
-        summary_df.to_csv(summary_csv_path, index=False)
-        radial_profile_df.to_csv(radial_profile_csv_path, index=False)
-
-        radial_fig, radial_ax = plt.subplots(figsize=(6, 4))
-        x = list(range(len(radial_profile_df)))
-        radial_ax.plot(x, radial_profile_df["mean"], marker="o", label="mean")
-        radial_ax.fill_between(
-            x,
-            radial_profile_df["mean"] - radial_profile_df["std"],
-            radial_profile_df["mean"] + radial_profile_df["std"],
-            alpha=0.25,
-            label="±1 std",
-        )
-        radial_ax.set_xticks(x)
-        radial_ax.set_xticklabels(radial_profile_df["ring"], rotation=30, ha="right")
-        radial_ax.set_ylabel("Attribution mass")
-        radial_ax.set_title("Transformer radial attribution profile")
-        radial_ax.legend()
-        radial_fig.tight_layout()
-        radial_fig.savefig(radial_profile_png_path, bbox_inches="tight")
-        plt.close(radial_fig)
-
-        center_hist_fig, center_hist_ax = plt.subplots(figsize=(6, 4))
-        center_hist_ax.hist(transformer_stats_df["mass_center_25_square"], bins=10)
-        center_hist_ax.set_title("Center 25% attribution mass")
-        center_hist_ax.set_xlabel("Mass fraction")
-        center_hist_ax.set_ylabel("Image count")
-        center_hist_fig.tight_layout()
-        center_hist_fig.savefig(center_mass_hist_png_path, bbox_inches="tight")
-        plt.close(center_hist_fig)
-
-        centroid_hist_fig, centroid_hist_ax = plt.subplots(figsize=(6, 4))
-        centroid_hist_ax.hist(transformer_stats_df["centroid_offset_norm"], bins=10)
-        centroid_hist_ax.set_title("Centroid offset distribution")
-        centroid_hist_ax.set_xlabel("Normalized offset")
-        centroid_hist_ax.set_ylabel("Image count")
-        centroid_hist_fig.tight_layout()
-        centroid_hist_fig.savefig(centroid_offset_hist_png_path, bbox_inches="tight")
-        plt.close(centroid_hist_fig)
-
-        aggregation_outputs = {
-            "stats_csv": str(stats_csv_path),
-            "stats_parquet": str(stats_parquet_path),
-            "summary_csv": str(summary_csv_path),
-            "radial_profile_csv": str(radial_profile_csv_path),
-            "radial_profile_png": str(radial_profile_png_path),
-            "center_mass_hist_png": str(center_mass_hist_png_path),
-            "centroid_offset_hist_png": str(centroid_offset_hist_png_path),
-            "summary": aggregate["summary"],
+        method_groups = {
+            "transformer_explainability": ["transformer_explainability"],
+            "captum_gradcam": [
+                "vit_token_gradcam",
+                "captum_gradcam_patch_embed",
+            ],
+            "captum_integrated_gradients": [
+                "captum_integrated_gradients_abs",
+                "captum_integrated_gradients_positive",
+            ],
+            "rise": ["rise_raw_image"],
         }
-        print("Saved transformer aggregation artifacts:")
-        for key, value in aggregation_outputs.items():
-            if key != "summary":
-                print(f"- {key}: {value}")
-        print("Transformer aggregation headline summary:")
-        for key, value in aggregate["summary"].items():
-            print(f"- {key}: {value}")
 
-    BATCH_CONFIG = {
-        "num_images": CONFIG.batch.num_images,
-        "selected_images": [path.name for path in selected_images],
-        "method_groups": method_groups,
-        "target": CONFIG.batch.target,
-        "output_dir": str(CONFIG.batch.output_dir),
-        "saved_outputs": saved_outputs,
-        "aggregation_outputs": aggregation_outputs,
+        if CONFIG.batch.target != "predicted_top1":
+            raise NotImplementedError(
+                f"Batch runner currently supports only CONFIG.batch.target='predicted_top1', got {CONFIG.batch.target!r}"
+            )
+
+        selected_images = images[: CONFIG.batch.num_images]
+        if not selected_images:
+            raise ValueError("No images available for batch attribution run.")
+
+        saved_outputs = []
+        transformer_heatmaps = []
+        total_jobs = sum(len(family_methods) for family_methods in method_groups.values()) * len(selected_images)
+
+        with mo.status.progress_bar(
+            total=total_jobs,
+            title="Batch attribution",
+            subtitle=f"0/{total_jobs} renders complete",
+            completion_title="Batch attribution complete",
+        ) as progress:
+            completed_jobs = 0
+            for family_name, family_methods in method_groups.items():
+                method_dir = CONFIG.batch.output_dir / family_name
+                method_dir.mkdir(parents=True, exist_ok=True)
+
+                for image_path in selected_images:
+                    batch_city_name = extract_city_name_from_filename(image_path.name)
+                    batch_prompts = build_prompts(batch_city_name)
+                    batch_pil_img, batch_image_tensor = load_image_tensor(image_path)
+                    batch_pred = predict(batch_image_tensor, batch_prompts)
+                    batch_target_idx = int(torch.argmax(batch_pred["probs"]).item())
+                    batch_target_label = MATERIAL_CLASSES[batch_target_idx]
+
+                    for method_name in family_methods:
+                        batch_heatmap = ATTRIBUTION_METHODS[method_name](
+                            batch_image_tensor,
+                            batch_target_idx,
+                            batch_prompts,
+                        )
+                        batch_fig = show_attribution(
+                            batch_pil_img,
+                            batch_heatmap,
+                            f"{method_name}: {batch_target_label}",
+                        )
+                        output_path = method_dir / f"{image_path.stem.replace(' ', '_')}__{method_name}.png"
+                        batch_fig.savefig(output_path, bbox_inches="tight")
+                        plt.close(batch_fig)
+                        saved_outputs.append(str(output_path))
+
+                        if method_name == "transformer_explainability":
+                            transformer_heatmaps.append(
+                                {
+                                    "image_id": image_path.name,
+                                    "city_name": batch_city_name,
+                                    "target_idx": batch_target_idx,
+                                    "target_label": batch_target_label,
+                                    "heatmap": batch_heatmap,
+                                }
+                            )
+
+                        completed_jobs += 1
+                        progress.update(
+                            title="Batch attribution",
+                            subtitle=(
+                                f"{completed_jobs}/{total_jobs} | "
+                                f"{image_path.name} | {method_name}"
+                            ),
+                        )
+
+        return {
+            "num_images": CONFIG.batch.num_images,
+            "selected_images": [path.name for path in selected_images],
+            "method_groups": method_groups,
+            "target": CONFIG.batch.target,
+            "output_dir": str(CONFIG.batch.output_dir),
+            "saved_outputs": saved_outputs,
+            "transformer_heatmaps": transformer_heatmaps,
+        }
+
+    BATCH_RUN_RESULTS = run_batch_attribution_visualizations()
+    BATCH_RUN_RESULTS
+    return (BATCH_RUN_RESULTS,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 15. Batch aggregate statistics
+
+    This cell only computes aggregate transformer attribution statistics using
+    `xAI_notebooks/attribution_helpers/feature_attribution_aggregation.py`.
+    """)
+    return
+
+
+@app.cell
+def _(BATCH_RUN_RESULTS, CONFIG, faa, mo, pd, plt):
+    transformer_records = BATCH_RUN_RESULTS["transformer_heatmaps"]
+    if not transformer_records:
+        raise ValueError("No transformer heatmaps available for aggregation.")
+
+    transformer_family_dir = CONFIG.batch.output_dir / "transformer_explainability"
+    transformer_stats = []
+    total_records = len(transformer_records)
+    with mo.status.progress_bar(
+        total=total_records,
+        title="Transformer aggregation",
+        subtitle=f"0/{total_records} heatmaps processed",
+        completion_title="Transformer aggregation complete",
+    ) as progress:
+        for index, record in enumerate(transformer_records, start=1):
+            spatial_stats = faa.compute_spatial_stats(
+                record["heatmap"],
+                method="transformer_explainability",
+                image_id=record["image_id"],
+            )
+            spatial_stats["target_idx"] = record["target_idx"]
+            spatial_stats["target_label"] = record["target_label"]
+            spatial_stats["city_name"] = record["city_name"]
+            transformer_stats.append(spatial_stats)
+            progress.update(
+                title="Transformer aggregation",
+                subtitle=f"{index}/{total_records} | {record['image_id']}",
+            )
+
+    transformer_stats_df = pd.DataFrame(transformer_stats)
+    stats_csv_path = transformer_family_dir / "transformer_spatial_stats.csv"
+    stats_parquet_path = transformer_family_dir / "transformer_spatial_stats.parquet"
+    summary_csv_path = transformer_family_dir / "transformer_spatial_summary.csv"
+    radial_profile_csv_path = transformer_family_dir / "transformer_radial_profile_summary.csv"
+    radial_profile_png_path = transformer_family_dir / "transformer_radial_profile.png"
+    center_mass_hist_png_path = transformer_family_dir / "transformer_center25_hist.png"
+    centroid_offset_hist_png_path = transformer_family_dir / "transformer_centroid_offset_hist.png"
+
+    transformer_stats_df.to_csv(stats_csv_path, index=False)
+    transformer_stats_df.to_parquet(stats_parquet_path, index=False)
+
+    aggregate = faa.aggregate_spatial_stats(transformer_stats_df)
+    summary_df = pd.DataFrame([aggregate["summary"]])
+    radial_profile_df = aggregate["radial_profile"]
+    summary_df.to_csv(summary_csv_path, index=False)
+    radial_profile_df.to_csv(radial_profile_csv_path, index=False)
+
+    radial_fig, radial_ax = plt.subplots(figsize=(6, 4))
+    x = list(range(len(radial_profile_df)))
+    radial_ax.plot(x, radial_profile_df["mean"], marker="o", label="mean")
+    radial_ax.fill_between(
+        x,
+        radial_profile_df["mean"] - radial_profile_df["std"],
+        radial_profile_df["mean"] + radial_profile_df["std"],
+        alpha=0.25,
+        label="±1 std",
+    )
+    radial_ax.set_xticks(x)
+    radial_ax.set_xticklabels(radial_profile_df["ring"], rotation=30, ha="right")
+    radial_ax.set_ylabel("Attribution mass")
+    radial_ax.set_title("Transformer radial attribution profile")
+    radial_ax.legend()
+    radial_fig.tight_layout()
+    radial_fig.savefig(radial_profile_png_path, bbox_inches="tight")
+    plt.close(radial_fig)
+
+    center_hist_fig, center_hist_ax = plt.subplots(figsize=(6, 4))
+    center_hist_ax.hist(transformer_stats_df["mass_center_25_square"], bins=10)
+    center_hist_ax.set_title("Center 25% attribution mass")
+    center_hist_ax.set_xlabel("Mass fraction")
+    center_hist_ax.set_ylabel("Image count")
+    center_hist_fig.tight_layout()
+    center_hist_fig.savefig(center_mass_hist_png_path, bbox_inches="tight")
+    plt.close(center_hist_fig)
+
+    centroid_hist_fig, centroid_hist_ax = plt.subplots(figsize=(6, 4))
+    centroid_hist_ax.hist(transformer_stats_df["centroid_offset_norm"], bins=10)
+    centroid_hist_ax.set_title("Centroid offset distribution")
+    centroid_hist_ax.set_xlabel("Normalized offset")
+    centroid_hist_ax.set_ylabel("Image count")
+    centroid_hist_fig.tight_layout()
+    centroid_hist_fig.savefig(centroid_offset_hist_png_path, bbox_inches="tight")
+    plt.close(centroid_hist_fig)
+
+    BATCH_AGGREGATION_RESULTS = {
+        "stats_csv": str(stats_csv_path),
+        "stats_parquet": str(stats_parquet_path),
+        "summary_csv": str(summary_csv_path),
+        "radial_profile_csv": str(radial_profile_csv_path),
+        "radial_profile_png": str(radial_profile_png_path),
+        "center_mass_hist_png": str(center_mass_hist_png_path),
+        "centroid_offset_hist_png": str(centroid_offset_hist_png_path),
+        "summary": aggregate["summary"],
     }
-    BATCH_CONFIG
-    return image_tensor, pil_img, prompts
+    BATCH_AGGREGATION_RESULTS
+    return
+
+
+@app.cell
+def _():
+    return
 
 
 if __name__ == "__main__":
