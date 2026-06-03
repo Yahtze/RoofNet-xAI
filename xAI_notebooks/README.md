@@ -164,6 +164,69 @@ Current batch outputs include:
 - center-mass histogram PNG
 - centroid-offset histogram PNG
 
+### Aggregate metrics reference
+
+The final notebook cell processes Transformer Explainability heatmaps through `attribution_helpers/feature_attribution_aggregation.py`. The per-image CSV contains these columns:
+
+#### Raw heatmap properties
+
+| Column | Meaning |
+|---|---|
+| `raw_sum` | Sum of all pixel values before normalization |
+| `raw_abs_sum` | Sum of absolute pixel values before normalization |
+| `raw_min` / `raw_max` | Min and max pixel value in raw heatmap |
+| `negative_mass_ratio` | `\|negative\| / \|total\|` — fraction of absolute mass that is negative. Near 0 → model used mostly positive evidence; near 0.5 → equal positive/negative |
+| `is_zero_sum` | True if heatmap is all zeros (attribution failed for that image) |
+
+#### Spatial concentration
+
+| Column | Meaning |
+|---|---|
+| `mass_center_25_square` | Fraction of total attribution mass inside the central 25%-area square |
+| `mass_center_50_square` | Fraction of total attribution mass inside the central 50%-area square |
+| `radius_for_50_mass_square` | Side fraction (0–1) of the smallest centered square that captures 50% of mass. Smaller → more concentrated |
+| `radius_for_50_mass_radial` | Normalized radius (0–1) of the smallest centered circle that captures 50% of mass. Smaller → more concentrated |
+| `radius_50_gap` | Square minus radial radius. Positive → mass is more circular than square; negative → mass follows square/edge pattern |
+
+#### Centroid and peak location
+
+| Column | Meaning |
+|---|---|
+| `centroid_x` / `centroid_y` | Attribution-weighted centroid in pixel coordinates |
+| `centroid_offset_px` / `centroid_offset_norm` | Euclidean distance from image center to centroid, in pixels / normalized to [0, 1]. Small offset_norm → model focused near center of image |
+| `peak_x` / `peak_y` | Coordinates of the single highest-attribution pixel |
+| `peak_offset_px` / `peak_offset_norm` | Offset of the peak pixel from center. Compare with centroid offset to distinguish broad (centroid near center, peak off-center) vs. sharp focus |
+
+#### Radial profile
+
+| Column | Meaning |
+|---|---|
+| `radial_profile_00_20` through `radial_profile_80_100` | Attribution mass fraction in each concentric ring (0–20%, 20–40%, …, 80–100% of max radius). Monotonically decreasing → center-focused; flat → diffuse |
+
+#### Cross-image summary (`transformer_spatial_summary.csv`)
+
+| Metric | Meaning |
+|---|---|
+| `num_images` | Number of heatmaps processed |
+| `zero_sum_images` | Count of all-zero heatmaps |
+| `median_mass_center_25_square` / `iqr_*` | Typical fraction of mass in center 25% area, with IQR spread. High median + narrow IQR → consistent center focus |
+| `median_mass_center_50_square` / `iqr_*` | Same for center 50% area |
+| `median_radius_for_50_mass_square` / `iqr_*` | Typical square crop size to capture half the mass |
+| `median_radius_for_50_mass_radial` / `iqr_*` | Typical radial radius to capture half the mass |
+| `fraction_center25_over_50pct` | Proportion of images where >50% of mass falls in center 25% area. High → strong center bias |
+| `median_centroid_offset_norm` | Typical centroid displacement. Near 0 → consistent center focus |
+| `median_peak_offset_norm` | Typical peak displacement. Compare with centroid offset |
+| `mean_negative_mass_ratio` | Average negative evidence across batch. If high, consider positive-only aggregation instead |
+| `median_radius_50_gap` | Typical gap between square and radial 50% radii. Large positive → mass is more circular than square |
+
+#### Generated plots
+
+| File | How to read it |
+|---|---|
+| `transformer_radial_profile.png` | Mean ± 1 std of attribution mass across radial rings. Steep drop → center-concentrated; flat → diffuse |
+| `transformer_center25_hist.png` | Histogram of `mass_center_25_square`. Right-skewed → most images concentrate in the center |
+| `transformer_centroid_offset_hist.png` | Histogram of `centroid_offset_norm`. Tight cluster near 0 → model looks at center consistently; spread out → variable focus |
+
 ## Notes
 
 - notebook currently uses **marimo**, not Jupyter, as primary interactive environment
