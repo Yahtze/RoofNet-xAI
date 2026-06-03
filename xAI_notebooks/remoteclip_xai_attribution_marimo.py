@@ -125,7 +125,7 @@ def _():
     from torchvision import transforms
     import matplotlib.pyplot as plt
 
-    import feature_attribution_aggregation as faa
+    from attribution_helpers import feature_attribution_aggregation as faa
     from attribution_helpers import captum_gradcam
     from attribution_helpers import captum_integrated_gradients
     from attribution_helpers import rise
@@ -166,9 +166,9 @@ def _():
         captum_gradcam,
         captum_integrated_gradients,
         dataclass,
+        faa,
         kagglehub,
         nn,
-        faa,
         np,
         open_clip,
         pd,
@@ -719,12 +719,12 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 10. Captum GradCAM
+    ## 10. GradCAM methods
 
     **What this section does:** registers two GradCAM-style methods that probe different stages of visual encoder.
 
-    Captum LayerGradCAM variants:
-    - `captum_gradcam_vit_tokens`: last visual transformer block, CLS dropped, patch tokens reshaped to grid
+    GradCAM variants:
+    - `vit_token_gradcam`: penultimate visual transformer block, CLS dropped, patch tokens reshaped to grid
     - `captum_gradcam_patch_embed`: raw patch projection layer `model.visual.conv1`
 
     Interpretation guide:
@@ -760,8 +760,8 @@ def _(
             if any(key in name.lower() for key in ["block", "resblock", "attn", "ln_post"]):
                 print(name, "->", module.__class__.__name__)
 
-    @register_attribution("captum_gradcam_vit_tokens")
-    def captum_gradcam_vit_tokens_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
+    @register_attribution("vit_token_gradcam")
+    def vit_token_gradcam_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
         if LayerGradCam is None:
             raise ImportError("Install captum: pip install captum")
         score_module = TargetScoreModule(prompts, target_idx)
@@ -992,7 +992,7 @@ def _(mo):
 
 @app.cell
 def _(run_attribution_method):
-    run_attribution_method("captum_gradcam_vit_tokens")
+    run_attribution_method("vit_token_gradcam")
     return
 
 
@@ -1107,7 +1107,7 @@ def _(
     method_groups = {
         "transformer_explainability": ["transformer_explainability"],
         "captum_gradcam": [
-            "captum_gradcam_vit_tokens",
+            "vit_token_gradcam",
             "captum_gradcam_patch_embed",
         ],
         "captum_integrated_gradients": [

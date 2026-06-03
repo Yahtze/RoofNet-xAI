@@ -204,7 +204,7 @@ def manual_token_gradcam_heatmap(
 
     activation = captured.get("activation")
     if activation is None or activation.grad is None:
-        raise RuntimeError("Missing layer activation or gradient for ViT token GradCAM fallback")
+        raise RuntimeError("Missing layer activation or gradient for manual ViT token GradCAM")
 
     act = activation.detach().float()
     grad = activation.grad.detach().float()
@@ -234,28 +234,16 @@ def vit_token_gradcam_heatmap(
     score_forward: Callable[[torch.Tensor], torch.Tensor],
     image_tensor: torch.Tensor,
     layer_gradcam_cls: Type,
-    layer_index: int = -1,
+    layer_index: int = -2,
 ) -> np.ndarray:
+    _ = layer_gradcam_cls
     layer = model.visual.transformer.resblocks[layer_index]
     grid_size = _grid_size(model)
-    attr = _attribute(
+    print("ViT-token GradCAM using manual token GradCAM path by default for ViT token outputs.")
+    return manual_token_gradcam_heatmap(
+        model=model,
         score_forward=score_forward,
         image_tensor=image_tensor,
         layer=layer,
-        layer_gradcam_cls=layer_gradcam_cls,
-        attr_dim_summation=False,
-        label="Captum ViT-token GradCAM",
+        grid_size=grid_size,
     )
-    try:
-        return token_attr_to_heatmap(attr, grid_size)
-    except ValueError as exc:
-        if attr.ndim == 3 and attr.shape[1] == 1:
-            print("Captum ViT GradCAM collapsed token dimension; using manual token GradCAM fallback.")
-            return manual_token_gradcam_heatmap(
-                model=model,
-                score_forward=score_forward,
-                image_tensor=image_tensor,
-                layer=layer,
-                grid_size=grid_size,
-            )
-        raise exc

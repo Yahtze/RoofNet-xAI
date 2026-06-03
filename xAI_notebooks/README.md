@@ -13,9 +13,9 @@ Current focus:
 xAI_notebooks/
 ├── README.md
 ├── remoteclip_xai_attribution_marimo.py
-├── feature_attribution_aggregation.py
 └── attribution_helpers/
     ├── __init__.py
+    ├── feature_attribution_aggregation.py
     ├── transformer_explainability.py
     ├── captum_gradcam.py
     ├── captum_integrated_gradients.py
@@ -39,7 +39,7 @@ What it handles:
 
 If you are exploring this repo and want to start somewhere, start here.
 
-### `feature_attribution_aggregation.py`
+### `attribution_helpers/feature_attribution_aggregation.py`
 Helper module for spatial aggregation of attribution heatmaps.
 
 Current responsibilities:
