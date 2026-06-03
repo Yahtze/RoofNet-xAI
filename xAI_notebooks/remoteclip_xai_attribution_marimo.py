@@ -113,6 +113,7 @@ def _(mo):
 def _():
     import os
     import random
+    import tempfile
     from dataclasses import dataclass
     from pathlib import Path
     from typing import Callable, Dict, List, Optional, Tuple
@@ -125,6 +126,7 @@ def _():
     from torchvision import transforms
     import matplotlib.pyplot as plt
 
+    from attribution_helpers import batch_recovery
     from attribution_helpers import feature_attribution_aggregation as faa
     from attribution_helpers import manual_gradcam
     from attribution_helpers import captum_integrated_gradients
@@ -163,6 +165,7 @@ def _():
         Path,
         REPO_ROOT,
         Tuple,
+        batch_recovery,
         captum_integrated_gradients,
         dataclass,
         dataset_split_helpers,
@@ -176,6 +179,7 @@ def _():
         plt,
         random,
         rise,
+        tempfile,
         torch,
         transformer_explainability,
         transforms,
@@ -195,7 +199,7 @@ def _(mo):
 
 
 @app.cell
-def _(Path, REPO_ROOT, dataclass):
+def _(Optional, Path, REPO_ROOT, dataclass):
     @dataclass(frozen=True)
     class AssetConfig:
         # =========================
@@ -250,7 +254,7 @@ def _(Path, REPO_ROOT, dataclass):
         # =========================
         # Future batch runner defaults
         # =========================
-        num_images: int  # Placeholder count for future batch processing
+        num_images: Optional[int]  # Placeholder count for future batch processing
         split: str  # Dataset split selector for batch runs
         methods: tuple[str, ...]  # Exact attribution methods to run in batch mode
         target: str  # Attribution target policy for future batch runs
@@ -306,7 +310,7 @@ def _(Path, REPO_ROOT, dataclass):
             return_diagnostics=True,
         ),
         batch=BatchConfig(
-            num_images=8,
+            num_images=None,
             split="holdout",
             methods=("transformer_explainability",),
             target="predicted_top1",
@@ -1143,6 +1147,7 @@ def _(mo):
     - takes first `CONFIG.batch.num_images` discovered images
     - runs all registered attribution methods
     - saves rendered attribution figures under `xAI_outputs/`
+    - writes a resume manifest and skips already-finished image+method jobs on rerun
 
     What it does not do:
     - no aggregate statistics
@@ -1158,16 +1163,20 @@ def _(
     CONFIG,
     MANUAL_GRADCAM_METHODS_REGISTERED,
     MATERIAL_CLASSES,
+    Path,
     RISE_METHODS_REGISTERED,
     TRANSFORMER_EXPLAINABILITY_REGISTERED,
+    batch_recovery,
     build_prompts,
     extract_city_name_from_filename,
+    faa,
     images,
     load_image_tensor,
     mo,
     plt,
     predict,
     show_attribution,
+    tempfile,
     torch,
 ):
     _ = (
@@ -1222,18 +1231,54 @@ def _(
                 f"Batch runner currently supports only CONFIG.batch.target='predicted_top1', got {CONFIG.batch.target!r}"
             )
 
-        selected_images = images[: CONFIG.batch.num_images]
+        selected_images = images if CONFIG.batch.num_images is None else images[: CONFIG.batch.num_images]
         if not selected_images:
             raise ValueError("No images available for batch attribution run.")
 
+        manifest_path = CONFIG.batch.output_dir / "batch_run_manifest.json"
+        manifest = batch_recovery.load_manifest(manifest_path)
+        transformer_family_dir = CONFIG.batch.output_dir / "transformer_explainability"
+        transformer_stats_csv_path = transformer_family_dir / "transformer_spatial_stats.csv"
+
         saved_outputs = []
-        transformer_heatmaps = []
+        skipped_outputs = []
+        failed_jobs = []
         total_jobs = sum(len(family_methods) for family_methods in selected_method_groups.values()) * len(selected_images)
+        print(
+            f"Expected batch workload: images={len(selected_images)}, "
+            f"methods={len(selected_methods)}, total_jobs={total_jobs}"
+        )
+        if total_jobs >= 100:
+            print(
+                "WARNING: Large batch run requested. "
+                "Consider reducing split size, num_images, or methods before continuing."
+            )
+
+        preexisting_done = 0
+        for family_name, family_methods in selected_method_groups.items():
+            method_dir = CONFIG.batch.output_dir / family_name
+            method_dir.mkdir(parents=True, exist_ok=True)
+            for image_path in selected_images:
+                output_stem = image_path.stem.replace(" ", "_")
+                for method_name in family_methods:
+                    output_path = method_dir / f"{output_stem}__{method_name}.png"
+                    job_id = batch_recovery.make_job_id(image_path.name, method_name)
+                    batch_recovery.upsert_job(
+                        manifest,
+                        job_id=job_id,
+                        image_id=image_path.name,
+                        method_name=method_name,
+                        output_path=output_path,
+                    )
+                    if batch_recovery.resolve_job_action(manifest, job_id=job_id, output_path=output_path) == "skip":
+                        preexisting_done += 1
+        batch_recovery.save_manifest(manifest_path, manifest)
+        print(f"Resume scan: skip_existing={preexisting_done}, rerun_remaining={total_jobs - preexisting_done}")
 
         with mo.status.progress_bar(
             total=total_jobs,
             title="Batch attribution",
-            subtitle=f"0/{total_jobs} renders complete",
+            subtitle=f"0/{total_jobs} jobs accounted for",
             completion_title="Batch attribution complete",
         ) as progress:
             completed_jobs = 0
@@ -1248,34 +1293,80 @@ def _(
                     batch_pred = predict(batch_image_tensor, batch_prompts)
                     batch_target_idx = int(torch.argmax(batch_pred["probs"]).item())
                     batch_target_label = MATERIAL_CLASSES[batch_target_idx]
+                    output_stem = image_path.stem.replace(" ", "_")
 
                     for method_name in family_methods:
-                        batch_heatmap = ATTRIBUTION_METHODS[method_name](
-                            batch_image_tensor,
-                            batch_target_idx,
-                            batch_prompts,
-                            verbose=False,
+                        batch_fig = None
+                        output_path = method_dir / f"{output_stem}__{method_name}.png"
+                        job_id = batch_recovery.make_job_id(image_path.name, method_name)
+                        action = batch_recovery.resolve_job_action(
+                            manifest,
+                            job_id=job_id,
+                            output_path=output_path,
                         )
-                        batch_fig = show_attribution(
-                            batch_pil_img,
-                            batch_heatmap,
-                            f"{method_name}: {batch_target_label}",
-                        )
-                        output_path = method_dir / f"{image_path.stem.replace(' ', '_')}__{method_name}.png"
-                        batch_fig.savefig(output_path, bbox_inches="tight")
-                        plt.close(batch_fig)
-                        saved_outputs.append(str(output_path))
-
-                        if method_name == "transformer_explainability":
-                            transformer_heatmaps.append(
-                                {
-                                    "image_id": image_path.name,
-                                    "city_name": batch_city_name,
-                                    "target_idx": batch_target_idx,
-                                    "target_label": batch_target_label,
-                                    "heatmap": batch_heatmap,
-                                }
+                        if action == "skip":
+                            skipped_outputs.append(str(output_path))
+                            completed_jobs += 1
+                            progress.update(
+                                title="Batch attribution",
+                                subtitle=(
+                                    f"{completed_jobs}/{total_jobs} | skipped | "
+                                    f"{image_path.name} | {method_name}"
+                                ),
                             )
+                            continue
+
+                        batch_recovery.mark_job_running(manifest, job_id)
+                        batch_recovery.save_manifest(manifest_path, manifest)
+                        try:
+                            batch_heatmap = ATTRIBUTION_METHODS[method_name](
+                                batch_image_tensor,
+                                batch_target_idx,
+                                batch_prompts,
+                                verbose=False,
+                            )
+                            batch_fig = show_attribution(
+                                batch_pil_img,
+                                batch_heatmap,
+                                f"{method_name}: {batch_target_label}",
+                            )
+                            with tempfile.NamedTemporaryFile(
+                                suffix=".png",
+                                dir=method_dir,
+                                delete=False,
+                            ) as tmp_file:
+                                temp_output_path = Path(tmp_file.name)
+                            batch_fig.savefig(temp_output_path, bbox_inches="tight")
+                            plt.close(batch_fig)
+                            batch_recovery.atomic_replace_file(temp_output_path, output_path)
+                            saved_outputs.append(str(output_path))
+
+                            if method_name == "transformer_explainability":
+                                spatial_stats = faa.compute_spatial_stats(
+                                    batch_heatmap,
+                                    method="transformer_explainability",
+                                    image_id=image_path.name,
+                                )
+                                spatial_stats["target_idx"] = batch_target_idx
+                                spatial_stats["target_label"] = batch_target_label
+                                spatial_stats["city_name"] = batch_city_name
+                                batch_recovery.append_stats_row(transformer_stats_csv_path, spatial_stats)
+
+                            batch_recovery.mark_job_done(manifest, job_id)
+                            batch_recovery.save_manifest(manifest_path, manifest)
+                        except Exception as exc:
+                            if batch_fig is not None:
+                                plt.close(batch_fig)
+                            batch_recovery.mark_job_failed(manifest, job_id, repr(exc))
+                            batch_recovery.save_manifest(manifest_path, manifest)
+                            failed_jobs.append({
+                                "job_id": job_id,
+                                "image_id": image_path.name,
+                                "method_name": method_name,
+                                "error": repr(exc),
+                            })
+                            print(f"FAILED batch job {job_id}: {exc!r}")
+                            raise
 
                         completed_jobs += 1
                         progress.update(
@@ -1286,8 +1377,17 @@ def _(
                             ),
                         )
 
+        manifest_summary = batch_recovery.summarize_jobs(manifest)
+        print(
+            "Batch manifest summary: "
+            f"done={manifest_summary.get('done', 0)}, "
+            f"failed={manifest_summary.get('failed', 0)}, "
+            f"pending={manifest_summary.get('pending', 0)}, "
+            f"running={manifest_summary.get('running', 0)}"
+        )
         return {
             "num_images": CONFIG.batch.num_images,
+            "num_selected_images": len(selected_images),
             "selected_images": [path.name for path in selected_images],
             "method_groups": selected_method_groups,
             "selected_methods": list(selected_methods),
@@ -1295,7 +1395,11 @@ def _(
             "target": CONFIG.batch.target,
             "output_dir": str(CONFIG.batch.output_dir),
             "saved_outputs": saved_outputs,
-            "transformer_heatmaps": transformer_heatmaps,
+            "skipped_outputs": skipped_outputs,
+            "failed_jobs": failed_jobs,
+            "manifest_path": str(manifest_path),
+            "transformer_stats_csv": str(transformer_stats_csv_path),
+            "manifest_summary": manifest_summary,
         }
 
     BATCH_RUN_RESULTS = run_batch_attribution_visualizations()
@@ -1310,41 +1414,25 @@ def _(mo):
 
     This cell only computes aggregate transformer attribution statistics using
     `xAI_notebooks/attribution_helpers/feature_attribution_aggregation.py`.
+    It reloads persisted per-image stats from disk, so aggregation can resume after kernel death.
     """)
     return
 
 
 @app.cell
-def _(BATCH_RUN_RESULTS, CONFIG, faa, mo, pd, plt):
-    transformer_records = BATCH_RUN_RESULTS["transformer_heatmaps"]
-    if not transformer_records:
-        raise ValueError("No transformer heatmaps available for aggregation.")
+def _(BATCH_RUN_RESULTS, CONFIG, Path, faa, pd, plt):
+    transformer_stats_csv_path = Path(BATCH_RUN_RESULTS["transformer_stats_csv"])
+    if not transformer_stats_csv_path.exists():
+        raise ValueError(
+            "No persisted transformer stats CSV found for aggregation. "
+            f"Expected: {transformer_stats_csv_path}"
+        )
 
     transformer_family_dir = CONFIG.batch.output_dir / "transformer_explainability"
-    transformer_stats = []
-    total_records = len(transformer_records)
-    with mo.status.progress_bar(
-        total=total_records,
-        title="Transformer aggregation",
-        subtitle=f"0/{total_records} heatmaps processed",
-        completion_title="Transformer aggregation complete",
-    ) as progress:
-        for index, record in enumerate(transformer_records, start=1):
-            spatial_stats = faa.compute_spatial_stats(
-                record["heatmap"],
-                method="transformer_explainability",
-                image_id=record["image_id"],
-            )
-            spatial_stats["target_idx"] = record["target_idx"]
-            spatial_stats["target_label"] = record["target_label"]
-            spatial_stats["city_name"] = record["city_name"]
-            transformer_stats.append(spatial_stats)
-            progress.update(
-                title="Transformer aggregation",
-                subtitle=f"{index}/{total_records} | {record['image_id']}",
-            )
+    transformer_stats_df = pd.read_csv(transformer_stats_csv_path)
+    if transformer_stats_df.empty:
+        raise ValueError("Transformer stats CSV is empty; no completed transformer jobs to aggregate.")
 
-    transformer_stats_df = pd.DataFrame(transformer_stats)
     stats_csv_path = transformer_family_dir / "transformer_spatial_stats.csv"
     stats_parquet_path = transformer_family_dir / "transformer_spatial_stats.parquet"
     summary_csv_path = transformer_family_dir / "transformer_spatial_summary.csv"
@@ -1353,6 +1441,7 @@ def _(BATCH_RUN_RESULTS, CONFIG, faa, mo, pd, plt):
     center_mass_hist_png_path = transformer_family_dir / "transformer_center25_hist.png"
     centroid_offset_hist_png_path = transformer_family_dir / "transformer_centroid_offset_hist.png"
 
+    transformer_stats_df = transformer_stats_df.drop_duplicates(subset=["image_id", "method"], keep="last")
     transformer_stats_df.to_csv(stats_csv_path, index=False)
     transformer_stats_df.to_parquet(stats_parquet_path, index=False)
 

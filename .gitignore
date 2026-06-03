@@ -19,3 +19,4 @@ test/
 
 # === Tooling artifacts ===
 .antigravitycli/
+xAI_outputs/batch_run_manifest.json
