@@ -17,9 +17,10 @@ xAI_notebooks/
     ├── __init__.py
     ├── feature_attribution_aggregation.py
     ├── transformer_explainability.py
-    ├── captum_gradcam.py
+    ├── manual_gradcam.py
     ├── captum_integrated_gradients.py
-    └── rise.py
+    ├── rise.py
+    └── dataset_split_helpers.py
 ```
 
 ## What each file does
@@ -30,11 +31,11 @@ Main marimo notebook entrypoint.
 What it handles:
 - environment/import checks
 - model + asset loading
-- image sampling
+- dataset-split-aware image sampling via metadata CSV
 - RemoteCLIP prediction sanity checks
-- attribution method registration
+- attribution method registration (no Captum dependency for GradCAM)
 - per-method visualization
-- batch attribution export
+- configurable batch attribution export (method subset, split filter)
 - transformer explainability aggregation export
 
 If you are exploring this repo and want to start somewhere, start here.
@@ -62,8 +63,8 @@ Implementation helpers for each attribution family.
 #### `transformer_explainability.py`
 Transformer attention-gradient relevance rollout for RemoteCLIP ViT-L/14.
 
-#### `captum_gradcam.py`
-Captum-based GradCAM utilities for:
+#### `manual_gradcam.py`
+Manual GradCAM utilities for:
 - ViT token-level GradCAM
 - patch embedding GradCAM
 
@@ -72,6 +73,11 @@ Captum Integrated Gradients helper functions.
 
 #### `rise.py`
 RISE black-box masking attribution helper functions.
+
+#### `dataset_split_helpers.py`
+Utilities for reproducible dataset-split-based image selection:
+- `collect_split_image_paths()` — filters metadata CSV by split (`train`/`val`/`holdout`/`all`), joins against actual files on disk
+- `write_split_helper_csvs()` — exports split-filtered CSV artifacts for auditability
 
 ## Environment setup
 
@@ -154,19 +160,15 @@ Asset behavior is configured inside notebook config cell.
 Notebook batch runs write outputs under:
 - `xAI_outputs/`
 
-Current batch outputs include:
+Batch outputs depend on configured methods and split:
 - per-method attribution PNGs
-- transformer explainability spatial stats CSV
-- transformer explainability spatial stats Parquet
-- transformer aggregation summary CSV
-- radial profile summary CSV
-- radial profile plot PNG
-- center-mass histogram PNG
-- centroid-offset histogram PNG
+- per-method-family spatial stats CSV (Parquet) + aggregation summary CSV
+- per-method-family radial profile, center-mass, and centroid-offset plot PNGs
+- split helper CSV artifacts (written alongside notebook by default)
 
 ### Aggregate metrics reference
 
-The final notebook cell processes Transformer Explainability heatmaps through `attribution_helpers/feature_attribution_aggregation.py`. The per-image CSV contains these columns:
+The batch runner processes each method family's heatmaps through `attribution_helpers/feature_attribution_aggregation.py`. The per-image CSV contains these columns:
 
 #### Raw heatmap properties
 
@@ -203,7 +205,7 @@ The final notebook cell processes Transformer Explainability heatmaps through `a
 |---|---|
 | `radial_profile_00_20` through `radial_profile_80_100` | Attribution mass fraction in each concentric ring (0–20%, 20–40%, …, 80–100% of max radius). Monotonically decreasing → center-focused; flat → diffuse |
 
-#### Cross-image summary (`transformer_spatial_summary.csv`)
+#### Cross-image summary (`{method_family}_spatial_summary.csv`)
 
 | Metric | Meaning |
 |---|---|
@@ -223,15 +225,17 @@ The final notebook cell processes Transformer Explainability heatmaps through `a
 
 | File | How to read it |
 |---|---|
-| `transformer_radial_profile.png` | Mean ± 1 std of attribution mass across radial rings. Steep drop → center-concentrated; flat → diffuse |
-| `transformer_center25_hist.png` | Histogram of `mass_center_25_square`. Right-skewed → most images concentrate in the center |
-| `transformer_centroid_offset_hist.png` | Histogram of `centroid_offset_norm`. Tight cluster near 0 → model looks at center consistently; spread out → variable focus |
+| `{method_family}_radial_profile.png` | Mean ± 1 std of attribution mass across radial rings. Steep drop → center-concentrated; flat → diffuse |
+| `{method_family}_center25_hist.png` | Histogram of `mass_center_25_square`. Right-skewed → most images concentrate in the center |
+| `{method_family}_centroid_offset_hist.png` | Histogram of `centroid_offset_norm`. Tight cluster near 0 → model looks at center consistently; spread out → variable focus |
 
 ## Notes
 
 - notebook currently uses **marimo**, not Jupyter, as primary interactive environment
 - helper modules are meant to keep notebook cells thinner and easier to test
-- transformer explainability aggregation is implemented first, but schema already includes `method` so future cross-method comparison is easier
+- GradCAM methods are fully manual (no Captum `LayerGradCam` dependency) — `manual_gradcam.py` replaces the old `captum_gradcam.py`
+- batch runner supports method selection via `CONFIG.batch.methods` and dataset-split filtering via `CONFIG.batch.split`
+- aggregation schema includes a `method` column, enabling cross-method spatial metric comparison
 - notebook contains lightweight self-install logic for some optional packages, but preferred path is still installing from `requirements.txt` and `requirements-dev.txt` first
 
 ## Troubleshooting

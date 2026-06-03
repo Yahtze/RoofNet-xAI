@@ -20,7 +20,7 @@ def _(mo):
 
     Supported attribution families in this notebook:
     - Transformer Explainability
-    - Captum LayerGradCAM / GradCAM-style attribution
+    - Manual GradCAM attribution
     - Captum Integrated Gradients
     - RISE black-box masking attribution
 
@@ -126,8 +126,9 @@ def _():
     import matplotlib.pyplot as plt
 
     from attribution_helpers import feature_attribution_aggregation as faa
-    from attribution_helpers import captum_gradcam
+    from attribution_helpers import manual_gradcam
     from attribution_helpers import captum_integrated_gradients
+    from attribution_helpers import dataset_split_helpers
     from attribution_helpers import rise
     from attribution_helpers.transformer_explainability import transformer_explainability
 
@@ -142,9 +143,9 @@ def _():
         kagglehub = None
 
     try:
-        from captum.attr import IntegratedGradients, LayerGradCam, LayerAttribution
+        from captum.attr import IntegratedGradients
     except ImportError:
-        IntegratedGradients = LayerGradCam = LayerAttribution = None
+        IntegratedGradients = None
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     REPO_ROOT = Path.cwd().resolve().parent if Path.cwd().name == "xAI_notebooks" else Path.cwd().resolve()
@@ -157,17 +158,17 @@ def _():
         Dict,
         Image,
         IntegratedGradients,
-        LayerGradCam,
         List,
         Optional,
         Path,
         REPO_ROOT,
         Tuple,
-        captum_gradcam,
         captum_integrated_gradients,
         dataclass,
+        dataset_split_helpers,
         faa,
         kagglehub,
+        manual_gradcam,
         nn,
         np,
         open_clip,
@@ -250,8 +251,11 @@ def _(Path, REPO_ROOT, dataclass):
         # Future batch runner defaults
         # =========================
         num_images: int  # Placeholder count for future batch processing
+        split: str  # Dataset split selector for batch runs
+        methods: tuple[str, ...]  # Exact attribution methods to run in batch mode
         target: str  # Attribution target policy for future batch runs
         output_dir: Path  # Directory where future batch outputs should be written
+        helper_csv_dir: Path  # Optional directory for exported split helper CSV artifacts
 
     @dataclass(frozen=True)
     class NotebookConfig:
@@ -303,8 +307,11 @@ def _(Path, REPO_ROOT, dataclass):
         ),
         batch=BatchConfig(
             num_images=8,
+            split="holdout",
+            methods=("transformer_explainability",),
             target="predicted_top1",
             output_dir=REPO_ROOT / "xAI_outputs",
+            helper_csv_dir=REPO_ROOT / "xAI_notebooks",
         ),
     )
 
@@ -510,8 +517,10 @@ def _(
     Tuple,
     assets,
     build_prompts,
+    dataset_split_helpers,
     extract_city_name_from_filename,
     model,
+    pd,
     plt,
     preprocess,
     random,
@@ -549,8 +558,32 @@ def _(
         logits = 100.0 * image_features @ text_features.T
         return logits[:, target_idx]
 
-    images = list_images(assets.image_dir)
-    print(f"Found {len(images)} images under {assets.image_dir}")
+    all_images = list_images(assets.image_dir)
+    print(f"Found {len(all_images)} images under {assets.image_dir}")
+
+    split_diagnostics = None
+    helper_csv_outputs = {}
+    if assets.metadata_csv is not None and assets.metadata_csv.exists():
+        metadata_df = pd.read_csv(assets.metadata_csv, low_memory=False)
+        print(f"Loaded metadata from: {assets.metadata_csv}")
+        helper_csv_outputs = dataset_split_helpers.write_split_helper_csvs(
+            metadata_df,
+            output_dir=CONFIG.batch.helper_csv_dir,
+        )
+        images, split_diagnostics = dataset_split_helpers.collect_split_image_paths(
+            image_dir=assets.image_dir,
+            metadata_df=metadata_df,
+            split=CONFIG.batch.split,
+            image_exts=CONFIG.assets.image_exts,
+        )
+    else:
+        print("No metadata CSV found. Falling back to unfiltered image discovery.")
+        images = all_images
+
+    if not images:
+        raise ValueError(f"No images available after applying split filter {CONFIG.batch.split!r}.")
+
+    print(f"Using {len(images)} images for split={CONFIG.batch.split!r}")
     sample_path = random.choice(images)
     city_name = extract_city_name_from_filename(sample_path.name)
     prompts = build_prompts(city_name)
@@ -726,13 +759,13 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 10. GradCAM methods
+    ## 10. Manual GradCAM methods
 
-    **What this section does:** registers two GradCAM-style methods that probe different stages of visual encoder.
+    **What this section does:** registers two manual GradCAM-style methods that probe different stages of visual encoder.
 
     GradCAM variants:
     - `vit_token_gradcam`: penultimate visual transformer block, CLS dropped, patch tokens reshaped to grid
-    - `captum_gradcam_patch_embed`: raw patch projection layer `model.visual.conv1`
+    - `manual_patch_gradcam`: raw patch projection layer `model.visual.conv1`
 
     Interpretation guide:
     - **ViT-token GradCAM:** later, more semantic focus after transformer processing
@@ -743,9 +776,8 @@ def _(mo):
 
 @app.cell
 def _(
-    LayerGradCam,
     List,
-    captum_gradcam,
+    manual_gradcam,
     model,
     nn,
     np,
@@ -775,46 +807,40 @@ def _(
         *,
         verbose: bool = True,
     ) -> np.ndarray:
-        if LayerGradCam is None:
-            raise ImportError("Install captum: pip install captum")
         score_module = TargetScoreModule(prompts, target_idx)
         model.zero_grad(set_to_none=True)
         try:
-            return captum_gradcam.vit_token_gradcam_heatmap(
+            return manual_gradcam.vit_token_gradcam_heatmap(
                 model=model,
                 score_forward=score_module,
                 image_tensor=image_tensor,
-                layer_gradcam_cls=LayerGradCam,
                 verbose=verbose,
             )
         finally:
             model.zero_grad(set_to_none=True)
 
-    @register_attribution("captum_gradcam_patch_embed")
-    def captum_gradcam_patch_embed_attr(
+    @register_attribution("manual_patch_gradcam")
+    def manual_patch_gradcam_attr(
         image_tensor: torch.Tensor,
         target_idx: int,
         prompts: List[str],
         *,
         verbose: bool = True,
     ) -> np.ndarray:
-        if LayerGradCam is None:
-            raise ImportError("Install captum: pip install captum")
         score_module = TargetScoreModule(prompts, target_idx)
         model.zero_grad(set_to_none=True)
         try:
-            return captum_gradcam.patch_embed_gradcam_heatmap(
+            return manual_gradcam.manual_patch_gradcam_heatmap(
                 model=model,
                 score_forward=score_module,
                 image_tensor=image_tensor,
-                layer_gradcam_cls=LayerGradCam,
                 verbose=verbose,
             )
         finally:
             model.zero_grad(set_to_none=True)
 
-    CAPTUM_GRADCAM_METHODS_REGISTERED = True
-    return (CAPTUM_GRADCAM_METHODS_REGISTERED,)
+    MANUAL_GRADCAM_METHODS_REGISTERED = True
+    return (MANUAL_GRADCAM_METHODS_REGISTERED,)
 
 
 @app.cell(hide_code=True)
@@ -972,8 +998,8 @@ def _(mo):
 @app.cell
 def _(
     ATTRIBUTION_METHODS: "Dict[str, AttributionFn]",
-    CAPTUM_GRADCAM_METHODS_REGISTERED,
     CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
+    MANUAL_GRADCAM_METHODS_REGISTERED,
     MATERIAL_CLASSES,
     RISE_METHODS_REGISTERED,
     TRANSFORMER_EXPLAINABILITY_REGISTERED,
@@ -985,7 +1011,7 @@ def _(
     topk,
 ):
     _ = (
-        CAPTUM_GRADCAM_METHODS_REGISTERED,
+        MANUAL_GRADCAM_METHODS_REGISTERED,
         CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
         RISE_METHODS_REGISTERED,
         TRANSFORMER_EXPLAINABILITY_REGISTERED,
@@ -1050,7 +1076,7 @@ def _(mo):
 
 @app.cell
 def _(run_attribution_method):
-    run_attribution_method("captum_gradcam_patch_embed")
+    run_attribution_method("manual_patch_gradcam")
     return
 
 
@@ -1128,9 +1154,9 @@ def _(mo):
 @app.cell
 def _(
     ATTRIBUTION_METHODS: "Dict[str, AttributionFn]",
-    CAPTUM_GRADCAM_METHODS_REGISTERED,
     CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
     CONFIG,
+    MANUAL_GRADCAM_METHODS_REGISTERED,
     MATERIAL_CLASSES,
     RISE_METHODS_REGISTERED,
     TRANSFORMER_EXPLAINABILITY_REGISTERED,
@@ -1145,7 +1171,7 @@ def _(
     torch,
 ):
     _ = (
-        CAPTUM_GRADCAM_METHODS_REGISTERED,
+        MANUAL_GRADCAM_METHODS_REGISTERED,
         CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
         RISE_METHODS_REGISTERED,
         TRANSFORMER_EXPLAINABILITY_REGISTERED,
@@ -1156,9 +1182,9 @@ def _(
 
         method_groups = {
             "transformer_explainability": ["transformer_explainability"],
-            "captum_gradcam": [
+            "manual_gradcam": [
                 "vit_token_gradcam",
-                "captum_gradcam_patch_embed",
+                "manual_patch_gradcam",
             ],
             "captum_integrated_gradients": [
                 "captum_integrated_gradients_abs",
@@ -1166,6 +1192,30 @@ def _(
             ],
             "rise": ["rise_raw_image"],
         }
+
+        all_methods = tuple(method for methods in method_groups.values() for method in methods)
+        requested_methods = tuple(CONFIG.batch.methods)
+        if not requested_methods or requested_methods == ("all",):
+            selected_methods = all_methods
+        else:
+            unknown_methods = [method for method in requested_methods if method not in ATTRIBUTION_METHODS]
+            if unknown_methods:
+                available_methods = ", ".join(sorted(ATTRIBUTION_METHODS))
+                raise ValueError(
+                    f"Unknown batch methods: {unknown_methods}. Available methods: {available_methods}"
+                )
+            selected_methods = requested_methods
+
+        selected_method_groups = {
+            family_name: [method for method in family_methods if method in selected_methods]
+            for family_name, family_methods in method_groups.items()
+        }
+        selected_method_groups = {
+            family_name: family_methods
+            for family_name, family_methods in selected_method_groups.items()
+            if family_methods
+        }
+        print(f"Batch method selection: {selected_methods}")
 
         if CONFIG.batch.target != "predicted_top1":
             raise NotImplementedError(
@@ -1178,7 +1228,7 @@ def _(
 
         saved_outputs = []
         transformer_heatmaps = []
-        total_jobs = sum(len(family_methods) for family_methods in method_groups.values()) * len(selected_images)
+        total_jobs = sum(len(family_methods) for family_methods in selected_method_groups.values()) * len(selected_images)
 
         with mo.status.progress_bar(
             total=total_jobs,
@@ -1187,7 +1237,7 @@ def _(
             completion_title="Batch attribution complete",
         ) as progress:
             completed_jobs = 0
-            for family_name, family_methods in method_groups.items():
+            for family_name, family_methods in selected_method_groups.items():
                 method_dir = CONFIG.batch.output_dir / family_name
                 method_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1239,7 +1289,9 @@ def _(
         return {
             "num_images": CONFIG.batch.num_images,
             "selected_images": [path.name for path in selected_images],
-            "method_groups": method_groups,
+            "method_groups": selected_method_groups,
+            "selected_methods": list(selected_methods),
+            "split": CONFIG.batch.split,
             "target": CONFIG.batch.target,
             "output_dir": str(CONFIG.batch.output_dir),
             "saved_outputs": saved_outputs,
