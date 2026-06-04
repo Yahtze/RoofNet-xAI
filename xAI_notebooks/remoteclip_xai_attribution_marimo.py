@@ -6,6 +6,16 @@ app = marimo.App()
 
 @app.cell
 def _():
+    import torch
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Startup device check: using {device.upper()}")
+    print(f"CUDA available: {torch.cuda.is_available()}")
+    return
+
+
+@app.cell
+def _():
     import marimo as mo
 
     return (mo,)
@@ -284,7 +294,7 @@ def _(Optional, Path, REPO_ROOT, dataclass):
             asset_mode="local",
             kaggle_dataset="doubleblindreview/xbd-roof-images",
             local_model_weights=REPO_ROOT / "best_clip_model_balanced.pth",
-            local_image_dir=REPO_ROOT / "xBD_cropped_roofs" / "xBD_cropped_roofs",
+            local_image_dir=REPO_ROOT / "RoofNet-Images",
             local_metadata_csv=REPO_ROOT / "roofnet_metadata.csv",
             image_exts=(".jpg", ".jpeg", ".png", ".webp"),
         ),

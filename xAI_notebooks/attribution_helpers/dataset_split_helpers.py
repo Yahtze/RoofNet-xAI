@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Iterable, List, Sequence, Tuple
+import unicodedata
 
 import pandas as pd
 
 VALID_SPLITS = ("train", "val", "holdout", "all")
+
+
+def _normalize_filename(value: object) -> str:
+    return unicodedata.normalize("NFC", str(value).strip())
 
 
 def normalize_split_name(split: str) -> str:
@@ -22,7 +27,7 @@ def _normalized_metadata(df: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("Metadata CSV must contain a 'split' column.")
 
     normalized = df.copy()
-    normalized["filename"] = normalized["filename"].fillna("").astype(str).str.strip()
+    normalized["filename"] = normalized["filename"].fillna("").map(_normalize_filename)
     normalized["split"] = normalized["split"].fillna("unknown").astype(str).str.strip().str.lower()
     normalized = normalized[normalized["filename"] != ""].copy()
     return normalized
@@ -33,8 +38,9 @@ def _build_image_lookup(image_dir: Path, image_exts: Sequence[str]) -> Dict[str,
     normalized_exts = {ext.lower() for ext in image_exts}
 
     for path in sorted(image_dir.rglob("*")):
-        if path.is_file() and path.suffix.lower() in normalized_exts and path.name not in lookup:
-            lookup[path.name] = path
+        normalized_name = _normalize_filename(path.name)
+        if path.is_file() and path.suffix.lower() in normalized_exts and normalized_name not in lookup:
+            lookup[normalized_name] = path
 
     return lookup
 
