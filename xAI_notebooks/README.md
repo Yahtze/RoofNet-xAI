@@ -229,63 +229,63 @@ The batch runner processes each method family's heatmaps through `attribution_he
 | `{method_family}_center25_hist.png` | Histogram of `mass_center_25_square`. Right-skewed → most images concentrate in the center |
 | `{method_family}_centroid_offset_hist.png` | Histogram of `centroid_offset_norm`. Tight cluster near 0 → model looks at center consistently; spread out → variable focus |
 
-### Holdout-set Transformer Explainability summary (286 images)
+### Holdout-set Transformer Explainability summary (617 images)
 
-These numbers come from a full holdout-set batch run. Sample size is now large enough that patterns here should be treated as stable signals, not small-sample noise.
+These numbers come from a full holdout-set batch run over the entire holdout split. Sample size is large enough that patterns here should be treated as stable signals, not small-sample noise.
 
 #### Quick table
 
 | Section | Metric | Value | Interpretation |
 |---|---|---:|---|
-| Sample health | `num_images` | 286 | Full holdout set processed; statistics now meaningful. |
+| Sample health | `num_images` | 617 | Entire holdout set processed; statistics now meaningfully stable. |
 | Sample health | `zero_sum_images` | 0 | No failed or degenerate heatmaps. |
 | Sample health | `mean_negative_mass_ratio` | 0.0 | Transformer Explainability stayed strictly non-negative across holdout. |
-| Concentration | `median_mass_center_25_square` | 0.300 | Center quarter holds 30% of attribution; only weak center bias over 25% uniform baseline. |
-| Concentration | `iqr_mass_center_25_square` | 0.131 | Attention concentration varies meaningfully image to image. |
-| Concentration | `median_mass_center_50_square` | 0.534 | Center half holds just over 53% of attribution; model reads most of image. |
-| Concentration | `iqr_mass_center_50_square` | 0.131 | Similar spread as center-quarter metric. |
-| Concentration | `fraction_center25_over_50pct` | 0.059 | Only ~6% of images put majority of attribution in center quarter. |
-| Half-mass area | `median_radius_for_50_mass_square` | 0.685 | Large square crop needed to capture half the attribution. |
-| Half-mass area | `iqr_radius_for_50_mass_square` | 0.098 | Pattern fairly consistent across holdout. |
-| Half-mass area | `median_radius_for_50_mass_radial` | 0.543 | Radial estimate confirms attribution extends well beyond center. |
+| Concentration | `median_mass_center_25_square` | 0.286 | Center quarter holds 28.6% of attribution; only weak center bias over 25% uniform baseline. |
+| Concentration | `iqr_mass_center_25_square` | 0.129 | Attention concentration varies meaningfully image to image. |
+| Concentration | `median_mass_center_50_square` | 0.524 | Center half holds 52.4% of attribution; model still reads much of image. |
+| Concentration | `iqr_mass_center_50_square` | 0.145 | Similar spread as center-quarter metric. |
+| Concentration | `fraction_center25_over_50pct` | 0.039 | Only ~3.9% of images put majority of attribution in center quarter. |
+| Half-mass area | `median_radius_for_50_mass_square` | 0.693 | Large square crop needed to capture half the attribution. |
+| Half-mass area | `iqr_radius_for_50_mass_square` | 0.108 | Pattern fairly consistent across holdout. |
+| Half-mass area | `median_radius_for_50_mass_radial` | 0.550 | Radial estimate confirms attribution extends well beyond center. |
 | Half-mass area | `iqr_radius_for_50_mass_radial` | 0.088 | Slightly tighter spread than square estimate. |
-| Shape | `median_radius_50_gap` | 0.137 | Attribution often has directional lean rather than radial symmetry. |
-| Location | `median_centroid_offset_norm` | 0.105 | Average attribution mass stays broadly near image center. |
-| Location | `median_peak_offset_norm` | 0.541 | Strongest individual cue usually lies near image periphery. |
+| Shape | `median_radius_50_gap` | 0.139 | Attribution often has directional lean rather than radial symmetry. |
+| Location | `median_centroid_offset_norm` | 0.100 | Average attribution mass stays broadly near image center. |
+| Location | `median_peak_offset_norm` | 0.588 | Strongest individual cue usually lies near image periphery. |
 
 #### Sample health
 
-- `num_images: 286` — full holdout set processed.
+- `num_images: 617` — entire holdout set processed.
 - `zero_sum_images: 0` — every image produced a valid, non-degenerate attribution heatmap; no failed or blank outputs needed exclusion.
 - `mean_negative_mass_ratio: 0.0` — Transformer Explainability stayed strictly non-negative across all images, so normalization was clean and consistent throughout.
 
 #### How concentrated is model attention?
 
-- `median_mass_center_25_square: 0.300` — on a typical image, the center quarter of pixels contains 30% of total attribution. Uniform-random baseline would be 25%, so center preference exists but is weak.
-- `iqr_mass_center_25_square: 0.131` — meaningful image-to-image spread; some samples are more center-focused, many are not.
-- `median_mass_center_50_square: 0.534` — the center half of the image captures just over 53% of attribution on median. Against a 50% uniform baseline, this again suggests only weak center bias.
-- `iqr_mass_center_50_square: 0.131` — similar spread as center-25 metric; concentration is not uniform across dataset.
-- `fraction_center25_over_50pct: 0.059` — only about 6% of images (~17/286) place more than half their attribution mass inside the center quarter. Most images show diffuse, spread-out attention.
+- `median_mass_center_25_square: 0.286` — on a typical image, the center quarter of pixels contains 28.6% of total attribution. Uniform-random baseline would be 25%, so center preference exists but is weak.
+- `iqr_mass_center_25_square: 0.129` — meaningful image-to-image spread; some samples are more center-focused, many are not.
+- `median_mass_center_50_square: 0.524` — the center half of the image captures 52.4% of attribution on median. Against a 50% uniform baseline, this again suggests only weak center bias.
+- `iqr_mass_center_50_square: 0.145` — similar spread as center-25 metric; concentration is not uniform across dataset.
+- `fraction_center25_over_50pct: 0.039` — only about 3.9% of images (~24/617) place more than half their attribution mass inside the center quarter. Most images show diffuse, spread-out attention.
 
 #### How much area captures half the signal?
 
-- `median_radius_for_50_mass_square: 0.685` — square center-crops must span 68.5% of image half-width to capture 50% of attribution on a typical image. Large crop, weak central concentration.
-- `iqr_radius_for_50_mass_square: 0.098` — moderate spread; this pattern is fairly consistent across holdout.
-- `median_radius_for_50_mass_radial: 0.543` — radially, 54.3% of max image radius is needed to capture half the attribution mass. Same story: attribution extends well beyond center.
+- `median_radius_for_50_mass_square: 0.693` — square center-crops must span 69.3% of image half-width to capture 50% of attribution on a typical image. Large crop, weak central concentration.
+- `iqr_radius_for_50_mass_square: 0.108` — moderate spread; this pattern is fairly consistent across holdout.
+- `median_radius_for_50_mass_radial: 0.550` — radially, 55.0% of max image radius is needed to capture half the attribution mass. Same story: attribution extends well beyond center.
 - `iqr_radius_for_50_mass_radial: 0.088` — slightly tighter than square estimate, consistent with radial measure being less sensitive to directional asymmetry.
-- `median_radius_50_gap: 0.137` — square and radial estimates differ by ~14 percentage points on median, suggesting attribution is not radially symmetric and often has directional lean.
+- `median_radius_50_gap: 0.139` — square and radial estimates differ by ~14 percentage points on median, suggesting attribution is not radially symmetric and often has directional lean.
 
 #### Where is model actually looking?
 
-- `median_centroid_offset_norm: 0.105` — attribution center of mass sits only ~10.5% of image half-width away from geometric center. In aggregate, attention is still broadly centered.
-- `median_peak_offset_norm: 0.541` — the single strongest attribution pixel sits ~54.1% of image half-width away from center on median. Strongest individual cue is typically near image periphery, not roof center.
+- `median_centroid_offset_norm: 0.100` — attribution center of mass sits only ~10.0% of image half-width away from geometric center. In aggregate, attention is still broadly centered.
+- `median_peak_offset_norm: 0.588` — the single strongest attribution pixel sits ~58.8% of image half-width away from center on median. Strongest individual cue is typically near image periphery, not roof center.
 
 #### Main interpretation
 
 Most important tension in these results:
 
-- **Centroid story:** `0.105` suggests average attribution mass stays roughly centered.
-- **Peak story:** `0.541` suggests highest-value individual evidence often lives near image edge.
+- **Centroid story:** `0.100` suggests average attribution mass stays roughly centered.
+- **Peak story:** `0.588` suggests highest-value individual evidence often lives near image edge.
 
 Interpretation: model appears to use broadly distributed contextual evidence, while its strongest single cue often comes from peripheral content. That peripheral cue could be neighboring structures, shadows, vegetation, or road-edge context rather than rooftop material alone.
 

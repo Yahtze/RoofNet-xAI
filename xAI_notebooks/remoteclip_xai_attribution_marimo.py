@@ -6,11 +6,12 @@ app = marimo.App()
 
 @app.cell
 def _():
-    import torch
+    import importlib
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    _torch = importlib.import_module("torch")
+    device = "cuda" if _torch.cuda.is_available() else "cpu"
     print(f"Startup device check: using {device.upper()}")
-    print(f"CUDA available: {torch.cuda.is_available()}")
+    print(f"CUDA available: {_torch.cuda.is_available()}")
     return
 
 
