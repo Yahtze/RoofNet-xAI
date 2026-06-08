@@ -38,7 +38,12 @@ def _single_image_attr(attr: torch.Tensor) -> torch.Tensor:
     return attr
 
 
-def print_attribution_diagnostics(attr: torch.Tensor, eps: float = 1e-12) -> None:
+def print_attribution_diagnostics(
+    attr: torch.Tensor,
+    eps: float = 1e-12,
+    *,
+    verbose: bool = True,
+) -> None:
     attr = _single_image_attr(attr)
     abs_map = attr.abs().sum(dim=0)
     positive_map = torch.relu(attr).sum(dim=0)
@@ -48,12 +53,13 @@ def print_attribution_diagnostics(attr: torch.Tensor, eps: float = 1e-12) -> Non
     negative_mass = float(negative_map.sum())
     negative_to_abs_ratio = negative_mass / max(abs_mass, eps)
     abs_vs_positive_max_diff = float((abs_map - positive_map).abs().max())
-    print(
-        "Integrated Gradients attribution diagnostics: "
-        f"positive_mass={positive_mass:.6g}, negative_mass={negative_mass:.6g}, "
-        f"negative_to_abs_ratio={negative_to_abs_ratio:.6g}, "
-        f"abs_vs_positive_max_diff={abs_vs_positive_max_diff:.6g}"
-    )
+    if verbose:
+        print(
+            "Integrated Gradients attribution diagnostics: "
+            f"positive_mass={positive_mass:.6g}, negative_mass={negative_mass:.6g}, "
+            f"negative_to_abs_ratio={negative_to_abs_ratio:.6g}, "
+            f"abs_vs_positive_max_diff={abs_vs_positive_max_diff:.6g}"
+        )
 
 
 def input_attr_to_heatmap(attr: torch.Tensor, *, reduction: Reduction) -> np.ndarray:
@@ -76,6 +82,7 @@ def integrated_gradients_heatmap(
     integrated_gradients_cls: Type,
     reduction: Reduction,
     n_steps: int = 50,
+    verbose: bool = True,
 ) -> np.ndarray:
     baseline = torch.zeros_like(image_tensor)
     ig = integrated_gradients_cls(score_forward)
@@ -86,10 +93,11 @@ def integrated_gradients_heatmap(
         return_convergence_delta=True,
     )
     delta_tensor = delta.detach().float().cpu()
-    print(
-        "Integrated Gradients convergence delta: "
-        f"shape={tuple(delta_tensor.shape)}, max_abs={float(delta_tensor.abs().max()):.6g}, "
-        f"mean_abs={float(delta_tensor.abs().mean()):.6g}"
-    )
-    print_attribution_diagnostics(attr)
+    if verbose:
+        print(
+            "Integrated Gradients convergence delta: "
+            f"shape={tuple(delta_tensor.shape)}, max_abs={float(delta_tensor.abs().max()):.6g}, "
+            f"mean_abs={float(delta_tensor.abs().mean()):.6g}"
+        )
+    print_attribution_diagnostics(attr, verbose=verbose)
     return input_attr_to_heatmap(attr, reduction=reduction)

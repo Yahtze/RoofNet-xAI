@@ -6,6 +6,17 @@ app = marimo.App()
 
 @app.cell
 def _():
+    import importlib
+
+    _torch = importlib.import_module("torch")
+    device = "cuda" if _torch.cuda.is_available() else "cpu"
+    print(f"Startup device check: using {device.upper()}")
+    print(f"CUDA available: {_torch.cuda.is_available()}")
+    return
+
+
+@app.cell
+def _():
     import marimo as mo
 
     return (mo,)
@@ -20,7 +31,7 @@ def _(mo):
 
     Supported attribution families in this notebook:
     - Transformer Explainability
-    - Captum LayerGradCAM / GradCAM-style attribution
+    - Manual GradCAM attribution
     - Captum Integrated Gradients
     - RISE black-box masking attribution
 
@@ -79,6 +90,7 @@ def _():
         "kagglehub": ["kagglehub", "kagglesdk==0.1.23"],
         "open_clip": ["open_clip_torch"],
         "marimo": ["marimo"],
+        "pandas": ["pandas", "pyarrow"],
     }
 
     packages_to_install = []
@@ -112,19 +124,24 @@ def _(mo):
 def _():
     import os
     import random
+    import tempfile
     from dataclasses import dataclass
     from pathlib import Path
     from typing import Callable, Dict, List, Optional, Tuple
 
     import numpy as np
+    import pandas as pd
     import torch
     import torch.nn as nn
     from PIL import Image
     from torchvision import transforms
     import matplotlib.pyplot as plt
 
-    from attribution_helpers import captum_gradcam
+    from attribution_helpers import batch_recovery
+    from attribution_helpers import feature_attribution_aggregation as faa
+    from attribution_helpers import manual_gradcam
     from attribution_helpers import captum_integrated_gradients
+    from attribution_helpers import dataset_split_helpers
     from attribution_helpers import rise
     from attribution_helpers.transformer_explainability import transformer_explainability
 
@@ -139,9 +156,9 @@ def _():
         kagglehub = None
 
     try:
-        from captum.attr import IntegratedGradients, LayerGradCam, LayerAttribution
+        from captum.attr import IntegratedGradients
     except ImportError:
-        IntegratedGradients = LayerGradCam = LayerAttribution = None
+        IntegratedGradients = None
 
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     REPO_ROOT = Path.cwd().resolve().parent if Path.cwd().name == "xAI_notebooks" else Path.cwd().resolve()
@@ -154,22 +171,26 @@ def _():
         Dict,
         Image,
         IntegratedGradients,
-        LayerGradCam,
         List,
         Optional,
         Path,
         REPO_ROOT,
         Tuple,
-        captum_gradcam,
+        batch_recovery,
         captum_integrated_gradients,
         dataclass,
+        dataset_split_helpers,
+        faa,
         kagglehub,
+        manual_gradcam,
         nn,
         np,
         open_clip,
+        pd,
         plt,
         random,
         rise,
+        tempfile,
         torch,
         transformer_explainability,
         transforms,
@@ -189,7 +210,7 @@ def _(mo):
 
 
 @app.cell
-def _(Path, REPO_ROOT, dataclass):
+def _(Optional, Path, REPO_ROOT, dataclass):
     @dataclass(frozen=True)
     class AssetConfig:
         # =========================
@@ -244,9 +265,12 @@ def _(Path, REPO_ROOT, dataclass):
         # =========================
         # Future batch runner defaults
         # =========================
-        num_images: int  # Placeholder count for future batch processing
+        num_images: Optional[int]  # Placeholder count for future batch processing
+        split: str  # Dataset split selector for batch runs
+        methods: tuple[str, ...]  # Exact attribution methods to run in batch mode
         target: str  # Attribution target policy for future batch runs
         output_dir: Path  # Directory where future batch outputs should be written
+        helper_csv_dir: Path  # Optional directory for exported split helper CSV artifacts
 
     @dataclass(frozen=True)
     class NotebookConfig:
@@ -271,7 +295,7 @@ def _(Path, REPO_ROOT, dataclass):
             asset_mode="local",
             kaggle_dataset="doubleblindreview/xbd-roof-images",
             local_model_weights=REPO_ROOT / "best_clip_model_balanced.pth",
-            local_image_dir=REPO_ROOT / "xBD_cropped_roofs" / "xBD_cropped_roofs",
+            local_image_dir=REPO_ROOT / "RoofNet-Images",
             local_metadata_csv=REPO_ROOT / "roofnet_metadata.csv",
             image_exts=(".jpg", ".jpeg", ".png", ".webp"),
         ),
@@ -297,9 +321,12 @@ def _(Path, REPO_ROOT, dataclass):
             return_diagnostics=True,
         ),
         batch=BatchConfig(
-            num_images=8,
+            num_images=None,
+            split="holdout",
+            methods=("transformer_explainability",),
             target="predicted_top1",
             output_dir=REPO_ROOT / "xAI_outputs",
+            helper_csv_dir=REPO_ROOT / "xAI_notebooks",
         ),
     )
 
@@ -505,8 +532,10 @@ def _(
     Tuple,
     assets,
     build_prompts,
+    dataset_split_helpers,
     extract_city_name_from_filename,
     model,
+    pd,
     plt,
     preprocess,
     random,
@@ -544,8 +573,32 @@ def _(
         logits = 100.0 * image_features @ text_features.T
         return logits[:, target_idx]
 
-    images = list_images(assets.image_dir)
-    print(f"Found {len(images)} images under {assets.image_dir}")
+    all_images = list_images(assets.image_dir)
+    print(f"Found {len(all_images)} images under {assets.image_dir}")
+
+    split_diagnostics = None
+    helper_csv_outputs = {}
+    if assets.metadata_csv is not None and assets.metadata_csv.exists():
+        metadata_df = pd.read_csv(assets.metadata_csv, low_memory=False)
+        print(f"Loaded metadata from: {assets.metadata_csv}")
+        helper_csv_outputs = dataset_split_helpers.write_split_helper_csvs(
+            metadata_df,
+            output_dir=CONFIG.batch.helper_csv_dir,
+        )
+        images, split_diagnostics = dataset_split_helpers.collect_split_image_paths(
+            image_dir=assets.image_dir,
+            metadata_df=metadata_df,
+            split=CONFIG.batch.split,
+            image_exts=CONFIG.assets.image_exts,
+        )
+    else:
+        print("No metadata CSV found. Falling back to unfiltered image discovery.")
+        images = all_images
+
+    if not images:
+        raise ValueError(f"No images available after applying split filter {CONFIG.batch.split!r}.")
+
+    print(f"Using {len(images)} images for split={CONFIG.batch.split!r}")
     sample_path = random.choice(images)
     city_name = extract_city_name_from_filename(sample_path.name)
     prompts = build_prompts(city_name)
@@ -697,7 +750,13 @@ def _(
     transformer_explainability,
 ):
     @register_attribution("transformer_explainability")
-    def transformer_explainability_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
+    def transformer_explainability_attr(
+        image_tensor: torch.Tensor,
+        target_idx: int,
+        prompts: List[str],
+        *,
+        verbose: bool = True,
+    ) -> np.ndarray:
         return transformer_explainability(
             model=model,
             tokenizer=tokenizer,
@@ -705,6 +764,7 @@ def _(
             prompts=prompts,
             target_idx=target_idx,
             image_size=CONFIG.preprocess.image_size,
+            verbose=verbose,
         )
 
     TRANSFORMER_EXPLAINABILITY_REGISTERED = True
@@ -714,13 +774,13 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 10. Captum GradCAM
+    ## 10. Manual GradCAM methods
 
-    **What this section does:** registers two GradCAM-style methods that probe different stages of visual encoder.
+    **What this section does:** registers two manual GradCAM-style methods that probe different stages of visual encoder.
 
-    Captum LayerGradCAM variants:
-    - `captum_gradcam_vit_tokens`: last visual transformer block, CLS dropped, patch tokens reshaped to grid
-    - `captum_gradcam_patch_embed`: raw patch projection layer `model.visual.conv1`
+    GradCAM variants:
+    - `vit_token_gradcam`: penultimate visual transformer block, CLS dropped, patch tokens reshaped to grid
+    - `manual_patch_gradcam`: raw patch projection layer `model.visual.conv1`
 
     Interpretation guide:
     - **ViT-token GradCAM:** later, more semantic focus after transformer processing
@@ -731,9 +791,8 @@ def _(mo):
 
 @app.cell
 def _(
-    LayerGradCam,
     List,
-    captum_gradcam,
+    manual_gradcam,
     model,
     nn,
     np,
@@ -755,40 +814,48 @@ def _(
             if any(key in name.lower() for key in ["block", "resblock", "attn", "ln_post"]):
                 print(name, "->", module.__class__.__name__)
 
-    @register_attribution("captum_gradcam_vit_tokens")
-    def captum_gradcam_vit_tokens_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
-        if LayerGradCam is None:
-            raise ImportError("Install captum: pip install captum")
+    @register_attribution("vit_token_gradcam")
+    def vit_token_gradcam_attr(
+        image_tensor: torch.Tensor,
+        target_idx: int,
+        prompts: List[str],
+        *,
+        verbose: bool = True,
+    ) -> np.ndarray:
         score_module = TargetScoreModule(prompts, target_idx)
         model.zero_grad(set_to_none=True)
         try:
-            return captum_gradcam.vit_token_gradcam_heatmap(
+            return manual_gradcam.vit_token_gradcam_heatmap(
                 model=model,
                 score_forward=score_module,
                 image_tensor=image_tensor,
-                layer_gradcam_cls=LayerGradCam,
+                verbose=verbose,
             )
         finally:
             model.zero_grad(set_to_none=True)
 
-    @register_attribution("captum_gradcam_patch_embed")
-    def captum_gradcam_patch_embed_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
-        if LayerGradCam is None:
-            raise ImportError("Install captum: pip install captum")
+    @register_attribution("manual_patch_gradcam")
+    def manual_patch_gradcam_attr(
+        image_tensor: torch.Tensor,
+        target_idx: int,
+        prompts: List[str],
+        *,
+        verbose: bool = True,
+    ) -> np.ndarray:
         score_module = TargetScoreModule(prompts, target_idx)
         model.zero_grad(set_to_none=True)
         try:
-            return captum_gradcam.patch_embed_gradcam_heatmap(
+            return manual_gradcam.manual_patch_gradcam_heatmap(
                 model=model,
                 score_forward=score_module,
                 image_tensor=image_tensor,
-                layer_gradcam_cls=LayerGradCam,
+                verbose=verbose,
             )
         finally:
             model.zero_grad(set_to_none=True)
 
-    CAPTUM_GRADCAM_METHODS_REGISTERED = True
-    return (CAPTUM_GRADCAM_METHODS_REGISTERED,)
+    MANUAL_GRADCAM_METHODS_REGISTERED = True
+    return (MANUAL_GRADCAM_METHODS_REGISTERED,)
 
 
 @app.cell(hide_code=True)
@@ -837,6 +904,7 @@ def _(
         prompts: List[str],
         *,
         reduction: str,
+        verbose: bool = True,
     ) -> np.ndarray:
         if IntegratedGradients is None:
             raise ImportError("Install captum: pip install captum")
@@ -849,17 +917,30 @@ def _(
                 integrated_gradients_cls=IntegratedGradients,
                 reduction=reduction,
                 n_steps=CONFIG.integrated_gradients.n_steps,
+                verbose=verbose,
             )
         finally:
             model.zero_grad(set_to_none=True)
 
     @register_attribution("captum_integrated_gradients_abs")
-    def captum_integrated_gradients_abs_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
-        return _integrated_gradients_attr(image_tensor, target_idx, prompts, reduction="abs")
+    def captum_integrated_gradients_abs_attr(
+        image_tensor: torch.Tensor,
+        target_idx: int,
+        prompts: List[str],
+        *,
+        verbose: bool = True,
+    ) -> np.ndarray:
+        return _integrated_gradients_attr(image_tensor, target_idx, prompts, reduction="abs", verbose=verbose)
 
     @register_attribution("captum_integrated_gradients_positive")
-    def captum_integrated_gradients_positive_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
-        return _integrated_gradients_attr(image_tensor, target_idx, prompts, reduction="positive")
+    def captum_integrated_gradients_positive_attr(
+        image_tensor: torch.Tensor,
+        target_idx: int,
+        prompts: List[str],
+        *,
+        verbose: bool = True,
+    ) -> np.ndarray:
+        return _integrated_gradients_attr(image_tensor, target_idx, prompts, reduction="positive", verbose=verbose)
 
     CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED = True
     return (CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,)
@@ -890,7 +971,13 @@ def _(CONFIG, List, model, np, register_attribution, rise, tokenizer, torch):
         return image_features @ text_features.T[:, target_idx]
 
     @register_attribution("rise_raw_image")
-    def rise_raw_image_attr(image_tensor: torch.Tensor, target_idx: int, prompts: List[str]) -> np.ndarray:
+    def rise_raw_image_attr(
+        image_tensor: torch.Tensor,
+        target_idx: int,
+        prompts: List[str],
+        *,
+        verbose: bool = True,
+    ) -> np.ndarray:
         generator_device = image_tensor.device if image_tensor.device.type != "mps" else "cpu"
         generator = torch.Generator(device=generator_device).manual_seed(CONFIG.seed)
         model.eval()
@@ -904,6 +991,7 @@ def _(CONFIG, List, model, np, register_attribution, rise, tokenizer, torch):
             mask_device=image_tensor.device,
             return_diagnostics=CONFIG.rise.return_diagnostics,
             generator=generator,
+            verbose=verbose,
         )[0]
 
     RISE_METHODS_REGISTERED = True
@@ -925,8 +1013,8 @@ def _(mo):
 @app.cell
 def _(
     ATTRIBUTION_METHODS: "Dict[str, AttributionFn]",
-    CAPTUM_GRADCAM_METHODS_REGISTERED,
     CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
+    MANUAL_GRADCAM_METHODS_REGISTERED,
     MATERIAL_CLASSES,
     RISE_METHODS_REGISTERED,
     TRANSFORMER_EXPLAINABILITY_REGISTERED,
@@ -938,7 +1026,7 @@ def _(
     topk,
 ):
     _ = (
-        CAPTUM_GRADCAM_METHODS_REGISTERED,
+        MANUAL_GRADCAM_METHODS_REGISTERED,
         CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
         RISE_METHODS_REGISTERED,
         TRANSFORMER_EXPLAINABILITY_REGISTERED,
@@ -987,7 +1075,7 @@ def _(mo):
 
 @app.cell
 def _(run_attribution_method):
-    run_attribution_method("captum_gradcam_vit_tokens")
+    run_attribution_method("vit_token_gradcam")
     return
 
 
@@ -1003,7 +1091,7 @@ def _(mo):
 
 @app.cell
 def _(run_attribution_method):
-    run_attribution_method("captum_gradcam_patch_embed")
+    run_attribution_method("manual_patch_gradcam")
     return
 
 
@@ -1062,21 +1150,19 @@ def _(run_attribution_method):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 14. Batch attribution runner
+    ## 14. Batch attribution visualizations
 
-    This section now runs batch export over a configurable slice of discovered images.
+    This cell mirrors earlier visualization runners, but loops across a batch of images.
 
     What it does:
     - takes first `CONFIG.batch.num_images` discovered images
     - runs all registered attribution methods
-    - groups saved figures into four family folders under `xAI_outputs/`
-    - prints per-image, per-method save diagnostics for research traceability
+    - saves rendered attribution figures under `xAI_outputs/`
+    - writes a resume manifest and skips already-finished image+method jobs on rerun
 
-    Output folders created:
-    - `xAI_outputs/transformer_explainability/`
-    - `xAI_outputs/captum_gradcam/`
-    - `xAI_outputs/captum_integrated_gradients/`
-    - `xAI_outputs/rise/`
+    What it does not do:
+    - no aggregate statistics
+    - no summary plots
     """)
     return
 
@@ -1084,79 +1170,352 @@ def _(mo):
 @app.cell
 def _(
     ATTRIBUTION_METHODS: "Dict[str, AttributionFn]",
+    CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
     CONFIG,
+    MANUAL_GRADCAM_METHODS_REGISTERED,
     MATERIAL_CLASSES,
+    Path,
+    RISE_METHODS_REGISTERED,
+    TRANSFORMER_EXPLAINABILITY_REGISTERED,
+    batch_recovery,
     build_prompts,
     extract_city_name_from_filename,
+    faa,
     images,
     load_image_tensor,
+    mo,
+    plt,
     predict,
     show_attribution,
+    tempfile,
     torch,
 ):
-    CONFIG.batch.output_dir.mkdir(parents=True, exist_ok=True)
+    _ = (
+        MANUAL_GRADCAM_METHODS_REGISTERED,
+        CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
+        RISE_METHODS_REGISTERED,
+        TRANSFORMER_EXPLAINABILITY_REGISTERED,
+    )
 
-    method_groups = {
-        "transformer_explainability": ["transformer_explainability"],
-        "captum_gradcam": [
-            "captum_gradcam_vit_tokens",
-            "captum_gradcam_patch_embed",
-        ],
-        "captum_integrated_gradients": [
-            "captum_integrated_gradients_abs",
-            "captum_integrated_gradients_positive",
-        ],
-        "rise": ["rise_raw_image"],
-    }
+    def run_batch_attribution_visualizations() -> dict:
+        CONFIG.batch.output_dir.mkdir(parents=True, exist_ok=True)
 
-    if CONFIG.batch.target != "predicted_top1":
-        raise NotImplementedError(
-            f"Batch runner currently supports only CONFIG.batch.target='predicted_top1', got {CONFIG.batch.target!r}"
+        method_groups = {
+            "transformer_explainability": ["transformer_explainability"],
+            "manual_gradcam": [
+                "vit_token_gradcam",
+                "manual_patch_gradcam",
+            ],
+            "captum_integrated_gradients": [
+                "captum_integrated_gradients_abs",
+                "captum_integrated_gradients_positive",
+            ],
+            "rise": ["rise_raw_image"],
+        }
+
+        all_methods = tuple(method for methods in method_groups.values() for method in methods)
+        requested_methods = tuple(CONFIG.batch.methods)
+        if not requested_methods or requested_methods == ("all",):
+            selected_methods = all_methods
+        else:
+            unknown_methods = [method for method in requested_methods if method not in ATTRIBUTION_METHODS]
+            if unknown_methods:
+                available_methods = ", ".join(sorted(ATTRIBUTION_METHODS))
+                raise ValueError(
+                    f"Unknown batch methods: {unknown_methods}. Available methods: {available_methods}"
+                )
+            selected_methods = requested_methods
+
+        selected_method_groups = {
+            family_name: [method for method in family_methods if method in selected_methods]
+            for family_name, family_methods in method_groups.items()
+        }
+        selected_method_groups = {
+            family_name: family_methods
+            for family_name, family_methods in selected_method_groups.items()
+            if family_methods
+        }
+        print(f"Batch method selection: {selected_methods}")
+
+        if CONFIG.batch.target != "predicted_top1":
+            raise NotImplementedError(
+                f"Batch runner currently supports only CONFIG.batch.target='predicted_top1', got {CONFIG.batch.target!r}"
+            )
+
+        selected_images = images if CONFIG.batch.num_images is None else images[: CONFIG.batch.num_images]
+        if not selected_images:
+            raise ValueError("No images available for batch attribution run.")
+
+        manifest_path = CONFIG.batch.output_dir / "batch_run_manifest.json"
+        manifest = batch_recovery.load_manifest(manifest_path)
+        transformer_family_dir = CONFIG.batch.output_dir / "transformer_explainability"
+        transformer_stats_csv_path = transformer_family_dir / "transformer_spatial_stats.csv"
+
+        saved_outputs = []
+        skipped_outputs = []
+        failed_jobs = []
+        total_jobs = sum(len(family_methods) for family_methods in selected_method_groups.values()) * len(selected_images)
+        print(
+            f"Expected batch workload: images={len(selected_images)}, "
+            f"methods={len(selected_methods)}, total_jobs={total_jobs}"
+        )
+        if total_jobs >= 100:
+            print(
+                "WARNING: Large batch run requested. "
+                "Consider reducing split size, num_images, or methods before continuing."
+            )
+
+        preexisting_done = 0
+        for family_name, family_methods in selected_method_groups.items():
+            method_dir = CONFIG.batch.output_dir / family_name
+            method_dir.mkdir(parents=True, exist_ok=True)
+            for image_path in selected_images:
+                output_stem = image_path.stem.replace(" ", "_")
+                for method_name in family_methods:
+                    output_path = method_dir / f"{output_stem}__{method_name}.png"
+                    job_id = batch_recovery.make_job_id(image_path.name, method_name)
+                    batch_recovery.upsert_job(
+                        manifest,
+                        job_id=job_id,
+                        image_id=image_path.name,
+                        method_name=method_name,
+                        output_path=output_path,
+                    )
+                    if batch_recovery.resolve_job_action(manifest, job_id=job_id, output_path=output_path) == "skip":
+                        preexisting_done += 1
+        batch_recovery.save_manifest(manifest_path, manifest)
+        print(f"Resume scan: skip_existing={preexisting_done}, rerun_remaining={total_jobs - preexisting_done}")
+
+        with mo.status.progress_bar(
+            total=total_jobs,
+            title="Batch attribution",
+            subtitle=f"0/{total_jobs} jobs accounted for",
+            completion_title="Batch attribution complete",
+        ) as progress:
+            completed_jobs = 0
+            for family_name, family_methods in selected_method_groups.items():
+                method_dir = CONFIG.batch.output_dir / family_name
+                method_dir.mkdir(parents=True, exist_ok=True)
+
+                for image_path in selected_images:
+                    batch_city_name = extract_city_name_from_filename(image_path.name)
+                    batch_prompts = build_prompts(batch_city_name)
+                    batch_pil_img, batch_image_tensor = load_image_tensor(image_path)
+                    batch_pred = predict(batch_image_tensor, batch_prompts)
+                    batch_target_idx = int(torch.argmax(batch_pred["probs"]).item())
+                    batch_target_label = MATERIAL_CLASSES[batch_target_idx]
+                    output_stem = image_path.stem.replace(" ", "_")
+
+                    for method_name in family_methods:
+                        batch_fig = None
+                        output_path = method_dir / f"{output_stem}__{method_name}.png"
+                        job_id = batch_recovery.make_job_id(image_path.name, method_name)
+                        action = batch_recovery.resolve_job_action(
+                            manifest,
+                            job_id=job_id,
+                            output_path=output_path,
+                        )
+                        if action == "skip":
+                            skipped_outputs.append(str(output_path))
+                            completed_jobs += 1
+                            progress.update(
+                                title="Batch attribution",
+                                subtitle=(
+                                    f"{completed_jobs}/{total_jobs} | skipped | "
+                                    f"{image_path.name} | {method_name}"
+                                ),
+                            )
+                            continue
+
+                        batch_recovery.mark_job_running(manifest, job_id)
+                        batch_recovery.save_manifest(manifest_path, manifest)
+                        try:
+                            batch_heatmap = ATTRIBUTION_METHODS[method_name](
+                                batch_image_tensor,
+                                batch_target_idx,
+                                batch_prompts,
+                                verbose=False,
+                            )
+                            batch_fig = show_attribution(
+                                batch_pil_img,
+                                batch_heatmap,
+                                f"{method_name}: {batch_target_label}",
+                            )
+                            with tempfile.NamedTemporaryFile(
+                                suffix=".png",
+                                dir=method_dir,
+                                delete=False,
+                            ) as tmp_file:
+                                temp_output_path = Path(tmp_file.name)
+                            batch_fig.savefig(temp_output_path, bbox_inches="tight")
+                            plt.close(batch_fig)
+                            batch_recovery.atomic_replace_file(temp_output_path, output_path)
+                            saved_outputs.append(str(output_path))
+
+                            if method_name == "transformer_explainability":
+                                spatial_stats = faa.compute_spatial_stats(
+                                    batch_heatmap,
+                                    method="transformer_explainability",
+                                    image_id=image_path.name,
+                                )
+                                spatial_stats["target_idx"] = batch_target_idx
+                                spatial_stats["target_label"] = batch_target_label
+                                spatial_stats["city_name"] = batch_city_name
+                                batch_recovery.append_stats_row(transformer_stats_csv_path, spatial_stats)
+
+                            batch_recovery.mark_job_done(manifest, job_id)
+                            batch_recovery.save_manifest(manifest_path, manifest)
+                        except Exception as exc:
+                            if batch_fig is not None:
+                                plt.close(batch_fig)
+                            batch_recovery.mark_job_failed(manifest, job_id, repr(exc))
+                            batch_recovery.save_manifest(manifest_path, manifest)
+                            failed_jobs.append({
+                                "job_id": job_id,
+                                "image_id": image_path.name,
+                                "method_name": method_name,
+                                "error": repr(exc),
+                            })
+                            print(f"FAILED batch job {job_id}: {exc!r}")
+                            raise
+
+                        completed_jobs += 1
+                        progress.update(
+                            title="Batch attribution",
+                            subtitle=(
+                                f"{completed_jobs}/{total_jobs} | "
+                                f"{image_path.name} | {method_name}"
+                            ),
+                        )
+
+        manifest_summary = batch_recovery.summarize_jobs(manifest)
+        print(
+            "Batch manifest summary: "
+            f"done={manifest_summary.get('done', 0)}, "
+            f"failed={manifest_summary.get('failed', 0)}, "
+            f"pending={manifest_summary.get('pending', 0)}, "
+            f"running={manifest_summary.get('running', 0)}"
+        )
+        return {
+            "num_images": CONFIG.batch.num_images,
+            "num_selected_images": len(selected_images),
+            "selected_images": [path.name for path in selected_images],
+            "method_groups": selected_method_groups,
+            "selected_methods": list(selected_methods),
+            "split": CONFIG.batch.split,
+            "target": CONFIG.batch.target,
+            "output_dir": str(CONFIG.batch.output_dir),
+            "saved_outputs": saved_outputs,
+            "skipped_outputs": skipped_outputs,
+            "failed_jobs": failed_jobs,
+            "manifest_path": str(manifest_path),
+            "transformer_stats_csv": str(transformer_stats_csv_path),
+            "manifest_summary": manifest_summary,
+        }
+
+    BATCH_RUN_RESULTS = run_batch_attribution_visualizations()
+    BATCH_RUN_RESULTS
+    return (BATCH_RUN_RESULTS,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 15. Batch aggregate statistics
+
+    This cell only computes aggregate transformer attribution statistics using
+    `xAI_notebooks/attribution_helpers/feature_attribution_aggregation.py`.
+    It reloads persisted per-image stats from disk, so aggregation can resume after kernel death.
+    """)
+    return
+
+
+@app.cell
+def _(BATCH_RUN_RESULTS, CONFIG, Path, faa, pd, plt):
+    transformer_stats_csv_path = Path(BATCH_RUN_RESULTS["transformer_stats_csv"])
+    if not transformer_stats_csv_path.exists():
+        raise ValueError(
+            "No persisted transformer stats CSV found for aggregation. "
+            f"Expected: {transformer_stats_csv_path}"
         )
 
-    selected_images = images[: CONFIG.batch.num_images]
-    if not selected_images:
-        raise ValueError("No images available for batch attribution run.")
+    transformer_family_dir = CONFIG.batch.output_dir / "transformer_explainability"
+    transformer_stats_df = pd.read_csv(transformer_stats_csv_path)
+    if transformer_stats_df.empty:
+        raise ValueError("Transformer stats CSV is empty; no completed transformer jobs to aggregate.")
 
-    saved_outputs = []
-    for family_name, family_methods in method_groups.items():
-        method_dir = CONFIG.batch.output_dir / family_name
-        method_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Ready batch output dir: {method_dir}")
+    stats_csv_path = transformer_family_dir / "transformer_spatial_stats.csv"
+    stats_parquet_path = transformer_family_dir / "transformer_spatial_stats.parquet"
+    summary_csv_path = transformer_family_dir / "transformer_spatial_summary.csv"
+    radial_profile_csv_path = transformer_family_dir / "transformer_radial_profile_summary.csv"
+    radial_profile_png_path = transformer_family_dir / "transformer_radial_profile.png"
+    center_mass_hist_png_path = transformer_family_dir / "transformer_center25_hist.png"
+    centroid_offset_hist_png_path = transformer_family_dir / "transformer_centroid_offset_hist.png"
 
-        for image_path in selected_images:
-            city_name = extract_city_name_from_filename(image_path.name)
-            prompts = build_prompts(city_name)
-            pil_img, image_tensor = load_image_tensor(image_path)
+    transformer_stats_df = transformer_stats_df.drop_duplicates(subset=["image_id", "method"], keep="last")
+    transformer_stats_df.to_csv(stats_csv_path, index=False)
+    transformer_stats_df.to_parquet(stats_parquet_path, index=False)
 
-            pred = predict(image_tensor, prompts)
-            target_idx = int(torch.argmax(pred["probs"]).item())
-            target_label = MATERIAL_CLASSES[target_idx]
+    aggregate = faa.aggregate_spatial_stats(transformer_stats_df)
+    summary_df = pd.DataFrame([aggregate["summary"]])
+    radial_profile_df = aggregate["radial_profile"]
+    summary_df.to_csv(summary_csv_path, index=False)
+    radial_profile_df.to_csv(radial_profile_csv_path, index=False)
 
-            for method_name in family_methods:
-                print(
-                    f"Batch attribution: image={image_path.name} | family={family_name} | "
-                    f"method={method_name} | target={target_label}"
-                )
-                heatmap = ATTRIBUTION_METHODS[method_name](image_tensor, target_idx, prompts)
-                fig = show_attribution(pil_img, heatmap, f"{method_name}: {target_label}")
+    radial_fig, radial_ax = plt.subplots(figsize=(6, 4))
+    x = list(range(len(radial_profile_df)))
+    radial_ax.plot(x, radial_profile_df["mean"], marker="o", label="mean")
+    radial_ax.fill_between(
+        x,
+        radial_profile_df["mean"] - radial_profile_df["std"],
+        radial_profile_df["mean"] + radial_profile_df["std"],
+        alpha=0.25,
+        label="±1 std",
+    )
+    radial_ax.set_xticks(x)
+    radial_ax.set_xticklabels(radial_profile_df["ring"], rotation=30, ha="right")
+    radial_ax.set_ylabel("Attribution mass")
+    radial_ax.set_title("Transformer radial attribution profile")
+    radial_ax.legend()
+    radial_fig.tight_layout()
+    radial_fig.savefig(radial_profile_png_path, bbox_inches="tight")
+    plt.close(radial_fig)
 
-                output_stem = image_path.stem.replace(" ", "_")
-                output_path = method_dir / f"{output_stem}__{method_name}.png"
-                fig.savefig(output_path, bbox_inches="tight")
-                saved_outputs.append(str(output_path))
-                print(f"Saved batch attribution: {output_path}")
+    center_hist_fig, center_hist_ax = plt.subplots(figsize=(6, 4))
+    center_hist_ax.hist(transformer_stats_df["mass_center_25_square"], bins=10)
+    center_hist_ax.set_title("Center 25% attribution mass")
+    center_hist_ax.set_xlabel("Mass fraction")
+    center_hist_ax.set_ylabel("Image count")
+    center_hist_fig.tight_layout()
+    center_hist_fig.savefig(center_mass_hist_png_path, bbox_inches="tight")
+    plt.close(center_hist_fig)
 
-    BATCH_CONFIG = {
-        "num_images": CONFIG.batch.num_images,
-        "selected_images": [path.name for path in selected_images],
-        "method_groups": method_groups,
-        "target": CONFIG.batch.target,
-        "output_dir": str(CONFIG.batch.output_dir),
-        "saved_outputs": saved_outputs,
+    centroid_hist_fig, centroid_hist_ax = plt.subplots(figsize=(6, 4))
+    centroid_hist_ax.hist(transformer_stats_df["centroid_offset_norm"], bins=10)
+    centroid_hist_ax.set_title("Centroid offset distribution")
+    centroid_hist_ax.set_xlabel("Normalized offset")
+    centroid_hist_ax.set_ylabel("Image count")
+    centroid_hist_fig.tight_layout()
+    centroid_hist_fig.savefig(centroid_offset_hist_png_path, bbox_inches="tight")
+    plt.close(centroid_hist_fig)
+
+    BATCH_AGGREGATION_RESULTS = {
+        "stats_csv": str(stats_csv_path),
+        "stats_parquet": str(stats_parquet_path),
+        "summary_csv": str(summary_csv_path),
+        "radial_profile_csv": str(radial_profile_csv_path),
+        "radial_profile_png": str(radial_profile_png_path),
+        "center_mass_hist_png": str(center_mass_hist_png_path),
+        "centroid_offset_hist_png": str(centroid_offset_hist_png_path),
+        "summary": aggregate["summary"],
     }
-    BATCH_CONFIG
-    return image_tensor, pil_img, prompts
+    BATCH_AGGREGATION_RESULTS
+    return
+
+
+@app.cell
+def _():
+    return
 
 
 if __name__ == "__main__":

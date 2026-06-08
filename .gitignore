@@ -3,6 +3,7 @@ best_clip_model_balanced.pth
 croissant_rai_RoofNet-Kaggle.json
 roofnet_metadata.csv
 xBD_cropped_roofs/
+RoofNet-Images/
 
 # === Local cache/runtime artifacts ===
 __pycache__/
@@ -13,9 +14,11 @@ __marimo__/
 docs/
 AGENTS.md
 test/
+tests/
 
 # === OS artifacts ===
 .DS_Store
 
 # === Tooling artifacts ===
 .antigravitycli/
+xAI_outputs/batch_run_manifest.json

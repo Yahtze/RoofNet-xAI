@@ -96,6 +96,7 @@ def rise_heatmap(
     return_diagnostics: bool = False,
     generator: Optional[torch.Generator] = None,
     masks: Optional[torch.Tensor] = None,
+    verbose: bool = True,
 ) -> np.ndarray | tuple[np.ndarray, dict[str, float | int]]:
     """Compute raw RISE heatmap using mean-baseline normalized-space masking.
 
@@ -166,5 +167,6 @@ def rise_heatmap(
         "generation_time_ms": float(generation_time_ms),
         "forward_time_ms": float(forward_time_ms),
     }
-    print(_format_diagnostics(diagnostics))
+    if verbose:
+        print(_format_diagnostics(diagnostics))
     return heatmap_np, diagnostics
