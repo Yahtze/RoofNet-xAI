@@ -91,6 +91,8 @@ def _():
         "open_clip": ["open_clip_torch"],
         "marimo": ["marimo"],
         "pandas": ["pandas", "pyarrow"],
+        # Optional segmentation extras installed manually when needed:
+        # groundingdino, segment-anything, opencv-python
     }
 
     packages_to_install = []
@@ -124,6 +126,7 @@ def _(mo):
 def _():
     import os
     import random
+    import shutil
     import tempfile
     from dataclasses import dataclass
     from pathlib import Path
@@ -138,7 +141,9 @@ def _():
     import matplotlib.pyplot as plt
 
     from attribution_helpers import batch_recovery
+    from attribution_helpers import grounding_sam
     from attribution_helpers import feature_attribution_aggregation as faa
+    from attribution_helpers import segmentation_iou
     from attribution_helpers import manual_gradcam
     from attribution_helpers import captum_integrated_gradients
     from attribution_helpers import dataset_split_helpers
@@ -181,6 +186,7 @@ def _():
         dataclass,
         dataset_split_helpers,
         faa,
+        grounding_sam,
         kagglehub,
         manual_gradcam,
         nn,
@@ -190,6 +196,8 @@ def _():
         plt,
         random,
         rise,
+        segmentation_iou,
+        shutil,
         tempfile,
         torch,
         transformer_explainability,
@@ -270,6 +278,7 @@ def _(Optional, Path, REPO_ROOT, dataclass):
         methods: tuple[str, ...]  # Exact attribution methods to run in batch mode
         target: str  # Attribution target policy for future batch runs
         output_dir: Path  # Directory where future batch outputs should be written
+        attribution_npz_dir: Path  # Clean-slate folder for persisted batch attribution heatmaps
         helper_csv_dir: Path  # Optional directory for exported split helper CSV artifacts
 
     @dataclass(frozen=True)
@@ -326,6 +335,7 @@ def _(Optional, Path, REPO_ROOT, dataclass):
             methods=("transformer_explainability",),
             target="predicted_top1",
             output_dir=REPO_ROOT / "xAI_outputs",
+            attribution_npz_dir=REPO_ROOT / "xAI_outputs" / "attribution_npz",
             helper_csv_dir=REPO_ROOT / "xAI_notebooks",
         ),
     )
@@ -622,6 +632,7 @@ def _(
         pil_img,
         predict,
         prompts,
+        sample_path,
         target_score_forward,
         topk,
     )
@@ -1150,7 +1161,420 @@ def _(run_attribution_method):
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 14. Batch attribution visualizations
+    ## 14. Selected-image segmentation overlap
+
+    **What this section does:** adds optional GroundingDINO proposal generation, SAM box refinement, and attribution-versus-mask overlap analysis for current sampled image.
+
+    **Workflow:**
+    1. configure GroundingDINO and SAM paths plus thresholds
+    2. inspect dependency and model-loading diagnostics
+    3. generate GroundingDINO rooftop/building proposals
+    4. refine proposals into SAM masks
+    5. compare one selected attribution heatmap against those masks
+
+    **Expected output:** warnings if optional segmentation dependencies are missing, then proposal overlays, SAM-mask diagnostics, IoU tables, threshold-sensitivity plots, and random-baseline summary.
+    """)
+    return
+
+
+@app.cell
+def _(
+    ATTRIBUTION_METHODS: "Dict[str, AttributionFn]",
+    CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
+    MANUAL_GRADCAM_METHODS_REGISTERED,
+    RISE_METHODS_REGISTERED,
+    TRANSFORMER_EXPLAINABILITY_REGISTERED,
+    mo,
+):
+    _ = (
+        MANUAL_GRADCAM_METHODS_REGISTERED,
+        CAPTUM_INTEGRATED_GRADIENTS_METHODS_REGISTERED,
+        RISE_METHODS_REGISTERED,
+        TRANSFORMER_EXPLAINABILITY_REGISTERED,
+    )
+
+    segmentation_controls = {
+        "gdino_config_path": mo.ui.text(label="GroundingDINO config path", value=""),
+        "gdino_weights_path": mo.ui.text(label="GroundingDINO weights path", value=""),
+        "sam_weights_path": mo.ui.text(label="SAM weights path", value=""),
+        "sam_model_type": mo.ui.dropdown(options=["vit_h", "vit_l", "vit_b"], value="vit_h", label="SAM model type"),
+        "grounding_text_prompt": mo.ui.text(label="Grounding text prompt", value="rooftop . building roof . roof ."),
+        "gdino_box_threshold": mo.ui.slider(0.1, 0.9, value=0.35, step=0.05, label="GroundingDINO box threshold"),
+        "gdino_text_threshold": mo.ui.slider(0.1, 0.9, value=0.25, step=0.05, label="GroundingDINO text threshold"),
+        "attribution_iou_threshold_pct": mo.ui.slider(50, 99, value=80, step=1, label="Attribution percentile"),
+        "random_baseline_samples": mo.ui.number(start=1, stop=1000, value=100, label="Random baseline samples"),
+        "segmentation_method_name": mo.ui.dropdown(options=sorted(ATTRIBUTION_METHODS), value="transformer_explainability", label="Attribution method"),
+    }
+    mo.vstack([
+        mo.md("## 14. Selected-image segmentation overlap"),
+        mo.md("Configure GroundingDINO, SAM, and attribution-mask overlap settings."),
+        *segmentation_controls.values(),
+    ])
+    return (segmentation_controls,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 14.1 Segmentation controls and dependency diagnostics
+
+    **What this section does:** exposes file paths, prompts, thresholds, and attribution-method selection for overlap analysis.
+
+    **How to read it:**
+    - blank GroundingDINO/SAM paths keep model loading disabled
+    - dependency messages below tell you whether optional packages import cleanly
+    - warning panels are non-fatal; attribution notebook can still run without segmentation extras
+    """)
+    return
+
+
+@app.cell
+def _(grounding_sam):
+    dependency_status = grounding_sam.check_grounding_sam_dependencies()
+    for name, status in dependency_status.items():
+        print(f"{name}: {status.message}")
+    return (dependency_status,)
+
+
+@app.cell
+def _(DEVICE, grounding_sam, mo, segmentation_controls):
+    gdino_model = None
+    gdino_warning = None
+    try:
+        if not segmentation_controls["gdino_config_path"].value or not segmentation_controls["gdino_weights_path"].value:
+            gdino_warning = "Set GroundingDINO config path and weights path to enable proposal generation."
+        else:
+            gdino_model = grounding_sam.load_groundingdino_model(
+                segmentation_controls["gdino_config_path"].value,
+                segmentation_controls["gdino_weights_path"].value,
+                device=DEVICE,
+            )
+            print("Loaded GroundingDINO model")
+    except Exception as exc:
+        gdino_warning = str(exc)
+        print(f"GroundingDINO load failed: {exc!r}")
+    if gdino_warning:
+        mo.md(f"**GroundingDINO warning:** {gdino_warning}")
+    return gdino_model, gdino_warning
+
+
+@app.cell
+def _(DEVICE, grounding_sam, mo, segmentation_controls):
+    sam_predictor = None
+    sam_warning = None
+    try:
+        if not segmentation_controls["sam_weights_path"].value:
+            sam_warning = "Set SAM weights path to enable mask refinement."
+        else:
+            sam_predictor = grounding_sam.load_sam_predictor(
+                segmentation_controls["sam_weights_path"].value,
+                model_type=segmentation_controls["sam_model_type"].value,
+                device=DEVICE,
+            )
+            print("Loaded SAM predictor")
+    except Exception as exc:
+        sam_warning = str(exc)
+        print(f"SAM load failed: {exc!r}")
+    if sam_warning:
+        mo.md(f"**SAM warning:** {sam_warning}")
+    return sam_predictor, sam_warning
+
+
+@app.cell
+def _(dependency_status, mo):
+    warning_blocks = []
+    if not dependency_status["groundingdino"].ok:
+        warning_blocks.append(mo.md(f"**GroundingDINO warning:** {dependency_status['groundingdino'].message}"))
+    if not dependency_status["segment_anything"].ok:
+        warning_blocks.append(mo.md(f"**SAM warning:** {dependency_status['segment_anything'].message}"))
+    if warning_blocks:
+        mo.vstack(warning_blocks)
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 14.2 GroundingDINO proposals and SAM mask refinement
+
+    **What this section does:** runs GroundingDINO on current sampled image using configurable rooftop/building prompt, then refines each detected box with SAM.
+
+    **Expected output:**
+    - printed image name, prompt, and GroundingDINO box count
+    - box overlay figure for current image
+    - SAM mask count and per-mask pixel areas
+
+    If no boxes appear, adjust text prompt or thresholds before interpreting overlap metrics downstream.
+    """)
+    return
+
+
+@app.cell
+def _(
+    gdino_model,
+    gdino_warning,
+    grounding_sam,
+    pil_img,
+    sample_path,
+    segmentation_controls,
+):
+    grounding_prediction = None
+    if gdino_model is not None and not gdino_warning:
+        grounding_prediction = grounding_sam.run_groundingdino_inference(
+            gdino_model,
+            pil_img,
+            prompt=segmentation_controls["grounding_text_prompt"].value,
+            box_threshold=segmentation_controls["gdino_box_threshold"].value,
+            text_threshold=segmentation_controls["gdino_text_threshold"].value,
+        )
+        print(f"Selected image: {sample_path.name}")
+        print(f"GroundingDINO boxes: {len(grounding_prediction.boxes_xyxy)}")
+        print(f"Prompt: {segmentation_controls['grounding_text_prompt'].value}")
+    return (grounding_prediction,)
+
+
+app._unparsable_cell(
+    r"""
+    if grounding_prediction is None or len(grounding_prediction.boxes_xyxy) == 0:
+        return (mo.md("**No GroundingDINO boxes detected for current image.**"),)
+
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.imshow(pil_img)
+    for idx, (box, conf) in enumerate(zip(grounding_prediction.boxes_xyxy, grounding_prediction.confidences)):
+        x0, y0, x1, y1 = box
+        rect = plt.Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, edgecolor="cyan", linewidth=2)
+        ax.add_patch(rect)
+        ax.text(x0, y0, f"{idx}: {conf:.3f}", color="white", bbox={"facecolor": "black", "alpha": 0.6})
+    ax.axis("off")
+    ax.set_title("GroundingDINO rooftop proposals")
+    plt.close(fig)
+    """,
+    name="_"
+)
+
+
+@app.cell
+def _(
+    grounding_prediction,
+    grounding_sam,
+    pil_img,
+    sam_predictor,
+    sam_warning,
+):
+    sam_prediction = None
+    if grounding_prediction is not None and len(grounding_prediction.boxes_xyxy) > 0 and sam_predictor is not None and not sam_warning:
+        sam_prediction = grounding_sam.run_sam_box_refinement(sam_predictor, pil_img, grounding_prediction.boxes_xyxy)
+        print(f"SAM masks: {len(sam_prediction.masks)}")
+        print(f"SAM mask areas: {[int(mask.sum()) for mask in sam_prediction.masks]}")
+    return (sam_prediction,)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 14.3 Attribution-mask overlap metrics
+
+    **What this section does:** computes one attribution heatmap for current top-1 prediction, resizes it into SAM-mask space, binarizes by percentile, and scores overlap.
+
+    **Metrics reported:**
+    - **attribution_iou:** intersection over union between attribution mask and SAM mask
+    - **inside_ratio:** fraction of attribution pixels that fall inside mask
+    - **coverage_ratio:** fraction of SAM mask covered by attribution pixels
+    - **random baseline:** IoU expected from random masks at same attribution density
+    - **threshold sensitivity:** how IoU changes as attribution percentile moves from 50 to 99
+    """)
+    return
+
+
+@app.cell
+def _(
+    ATTRIBUTION_METHODS: "Dict[str, AttributionFn]",
+    image_tensor,
+    np,
+    prompts,
+    segmentation_controls,
+    topk,
+):
+    method_name = segmentation_controls["segmentation_method_name"].value
+    target_idx = int(topk.indices[0].item())
+    attribution_heatmap = ATTRIBUTION_METHODS[method_name](image_tensor, target_idx, prompts, verbose=False)
+    print(f"Selected attribution method: {method_name}")
+    print(f"Raw attribution shape: {np.asarray(attribution_heatmap).shape}")
+    return (attribution_heatmap,)
+
+
+@app.cell
+def _(
+    attribution_heatmap,
+    grounding_prediction,
+    sam_prediction,
+    segmentation_controls,
+    segmentation_iou,
+):
+    attribution_analysis = None
+    if sam_prediction is not None and sam_prediction.masks:
+        target_shape = sam_prediction.masks[0].shape
+        resized_map = segmentation_iou.resize_float_map_to_shape(attribution_heatmap, target_shape)
+        binary_mask, threshold_value = segmentation_iou.binarize_attribution_percentile(
+            resized_map,
+            segmentation_controls["attribution_iou_threshold_pct"].value,
+        )
+        combined_mask = segmentation_iou.combine_instance_masks(sam_prediction.masks)
+        instance_rows = segmentation_iou.compute_instance_iou_table(
+            binary_mask,
+            sam_prediction.masks,
+            boxes=getattr(grounding_prediction, "boxes_xyxy", None),
+            confidences=getattr(grounding_prediction, "confidences", None),
+        )
+        combined_metrics = segmentation_iou.compute_attribution_mask_metrics(binary_mask, combined_mask)
+        attribution_density = float(binary_mask.mean())
+        attribution_analysis = {
+            "resized_map": resized_map,
+            "binary_mask": binary_mask,
+            "threshold_value": threshold_value,
+            "combined_mask": combined_mask,
+            "instance_rows": instance_rows,
+            "combined_row": {
+                "instance_id": "combined",
+                "gdino_confidence": None,
+                "box_area": None,
+                "sam_mask_area": combined_metrics.sam_mask_area,
+                "attribution_area": combined_metrics.attribution_area,
+                "intersection_area": combined_metrics.intersection_area,
+                "union_area": combined_metrics.union_area,
+                "attribution_iou": combined_metrics.attribution_iou,
+                "inside_ratio": combined_metrics.inside_ratio,
+                "coverage_ratio": combined_metrics.coverage_ratio,
+            },
+            "attribution_density": attribution_density,
+        }
+        print(f"Resized attribution shape: {resized_map.shape}")
+        print(f"Threshold value: {threshold_value:.6f}")
+        print(f"Attribution density: {attribution_density:.6f}")
+    return (attribution_analysis,)
+
+
+app._unparsable_cell(
+    r"""
+    if attribution_analysis is None:
+        return (mo.md("**IoU analysis unavailable until SAM masks are generated.**"),)
+
+    metrics_df = pd.DataFrame(
+        attribution_analysis["instance_rows"] + [attribution_analysis["combined_row"]]
+    )
+    """,
+    name="_"
+)
+
+
+@app.cell
+def _(attribution_analysis, segmentation_controls, segmentation_iou):
+    threshold_rows = None
+    baseline_summary = None
+    if attribution_analysis is not None:
+        threshold_rows = segmentation_iou.sweep_threshold_iou(
+            attribution_analysis["resized_map"],
+            [attribution_analysis["combined_mask"]],
+            list(range(50, 100)),
+        )
+        baseline = segmentation_iou.random_mask_iou_baseline(
+            [attribution_analysis["combined_mask"]],
+            attribution_analysis["attribution_density"],
+            attribution_analysis["combined_mask"].shape,
+            n_samples=int(segmentation_controls["random_baseline_samples"].value),
+            seed=42,
+        )
+        actual_iou = attribution_analysis["combined_row"]["attribution_iou"]
+        random_iou_std = float(baseline["std_iou"])
+        random_iou_z = float((actual_iou - baseline["mean_iou"]) / random_iou_std) if random_iou_std > 0 else 0.0
+        baseline_summary = {
+            "actual_iou": actual_iou,
+            "random_iou_mean": float(baseline["mean_iou"]),
+            "random_iou_std": random_iou_std,
+            "random_iou_z": random_iou_z,
+        }
+        print(f"Baseline summary: {baseline_summary}")
+    return
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### 14.4 Overlays and sensitivity plots
+
+    **How to read these outputs:**
+    - overlay panel compares binary attribution support against combined SAM footprint
+    - baseline table asks whether observed IoU beats random placement at same attribution density
+    - threshold curve checks whether overlap is stable or brittle to binarization cutoff
+
+    Strong evidence usually means actual IoU stays above random baseline across a reasonable threshold band, not just at one percentile.
+    """)
+    return
+
+
+app._unparsable_cell(
+    r"""
+    if attribution_analysis is None:
+        return (mo.md("**Binary attribution and SAM overlay unavailable.**"),)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    axes[0].imshow(pil_img)
+    axes[0].set_title("Input image")
+    axes[1].imshow(attribution_analysis["binary_mask"], cmap="gray")
+    axes[1].set_title("Binary attribution mask")
+    axes[2].imshow(pil_img)
+    combined_mask = np.ma.masked_where(
+        ~attribution_analysis["combined_mask"], attribution_analysis["combined_mask"]
+    )
+    axes[2].imshow(combined_mask, cmap="spring", alpha=0.45)
+    overlay_title = "SAM overlap"
+    if baseline_summary is not None:
+        overlay_title = f"SAM overlap | IoU={baseline_summary['actual_iou']:.3f}"
+    axes[2].set_title(overlay_title)
+    for ax in axes:
+        ax.axis("off")
+    fig.tight_layout()
+    plt.close(fig)
+    """,
+    name="_"
+)
+
+
+app._unparsable_cell(
+    r"""
+    if baseline_summary is None:
+        return (mo.md("**Random baseline unavailable until overlap analysis runs.**"),)
+
+    baseline_df = pd.DataFrame([baseline_summary])
+    """,
+    name="_"
+)
+
+
+app._unparsable_cell(
+    r"""
+    if not threshold_rows:
+        return (mo.md("**Threshold sensitivity unavailable until overlap analysis runs.**"),)
+
+    threshold_df = pd.DataFrame(threshold_rows)
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(threshold_df["percentile"], threshold_df["combined_iou"], label="combined IoU")
+    ax.plot(threshold_df["percentile"], threshold_df["mean_instance_iou"], label="mean instance IoU")
+    ax.set_xlabel("Attribution percentile")
+    ax.set_ylabel("IoU")
+    ax.set_title("Threshold sensitivity")
+    ax.legend()
+    fig.tight_layout()
+    plt.close(fig)
+    """,
+    name="_"
+)
+
+
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ## 15. Batch attribution visualizations
 
     This cell mirrors earlier visualization runners, but loops across a batch of images.
 
@@ -1184,9 +1608,11 @@ def _(
     images,
     load_image_tensor,
     mo,
+    np,
     plt,
     predict,
     show_attribution,
+    shutil,
     tempfile,
     torch,
 ):
@@ -1199,6 +1625,11 @@ def _(
 
     def run_batch_attribution_visualizations() -> dict:
         CONFIG.batch.output_dir.mkdir(parents=True, exist_ok=True)
+        if CONFIG.batch.attribution_npz_dir.exists():
+            print(f"Removing prior attribution npz directory: {CONFIG.batch.attribution_npz_dir}")
+            shutil.rmtree(CONFIG.batch.attribution_npz_dir)
+        CONFIG.batch.attribution_npz_dir.mkdir(parents=True, exist_ok=True)
+        print(f"Writing fresh attribution npz bundles to: {CONFIG.batch.attribution_npz_dir}")
 
         method_groups = {
             "transformer_explainability": ["transformer_explainability"],
@@ -1347,10 +1778,28 @@ def _(
                                 delete=False,
                             ) as tmp_file:
                                 temp_output_path = Path(tmp_file.name)
+                            # fig.savefig(output_path, bbox_inches="tight")
                             batch_fig.savefig(temp_output_path, bbox_inches="tight")
                             plt.close(batch_fig)
                             batch_recovery.atomic_replace_file(temp_output_path, output_path)
                             saved_outputs.append(str(output_path))
+
+                            npz_output_path = CONFIG.batch.attribution_npz_dir / f"{output_stem}__{method_name}.npz"
+                            np.savez_compressed(
+                                npz_output_path,
+                                **{
+                                    "heatmap": np.asarray(batch_heatmap, dtype=np.float32),
+                                    "image_name": image_path.name,
+                                    "method_name": method_name,
+                                    "target_idx": batch_target_idx,
+                                    "target_label": batch_target_label,
+                                    "city_name": batch_city_name,
+                                    "prompts": np.asarray(batch_prompts, dtype=object),
+                                    "image_size": np.asarray(batch_pil_img.size, dtype=np.int32),
+                                    "heatmap_shape": np.asarray(np.asarray(batch_heatmap).shape, dtype=np.int32),
+                                },
+                            )
+                            print(f"Saved attribution npz: {npz_output_path}")
 
                             if method_name == "transformer_explainability":
                                 spatial_stats = faa.compute_spatial_stats(
@@ -1421,7 +1870,7 @@ def _(
 @app.cell(hide_code=True)
 def _(mo):
     mo.md(r"""
-    ## 15. Batch aggregate statistics
+    ## 16. Batch aggregate statistics
 
     This cell only computes aggregate transformer attribution statistics using
     `xAI_notebooks/attribution_helpers/feature_attribution_aggregation.py`.
