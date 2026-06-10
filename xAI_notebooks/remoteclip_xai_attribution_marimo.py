@@ -618,8 +618,8 @@ def _(
     topk = torch.topk(pred["probs"], k=5)
     print("Sample:", sample_path.name)
     print("City prompt context:", city_name)
-    for score, idx in zip(topk.values.tolist(), topk.indices.tolist()):
-        print(f"{MATERIAL_CLASSES[idx]:>28s}: {score:.3f}")
+    for score, class_idx in zip(topk.values.tolist(), topk.indices.tolist()):
+        print(f"{MATERIAL_CLASSES[class_idx]:>28s}: {score:.3f}")
 
     plt.figure(figsize=CONFIG.visualization.preview_figure_size)
     plt.imshow(pil_img)
@@ -1163,10 +1163,10 @@ def _(mo):
     mo.md(r"""
     ## 14. Selected-image segmentation overlap
 
-    **What this section does:** adds optional GroundingDINO proposal generation, SAM box refinement, and attribution-versus-mask overlap analysis for current sampled image.
+    **What this section does:** adds optional Hugging Face GroundingDINO proposal generation, SAM box refinement, and attribution-versus-mask overlap analysis for current sampled image.
 
     **Workflow:**
-    1. configure GroundingDINO and SAM paths plus thresholds
+    1. configure GroundingDINO and SAM model IDs plus thresholds
     2. inspect dependency and model-loading diagnostics
     3. generate GroundingDINO rooftop/building proposals
     4. refine proposals into SAM masks
@@ -1194,10 +1194,8 @@ def _(
     )
 
     segmentation_controls = {
-        "gdino_config_path": mo.ui.text(label="GroundingDINO config path", value=""),
-        "gdino_weights_path": mo.ui.text(label="GroundingDINO weights path", value=""),
-        "sam_weights_path": mo.ui.text(label="SAM weights path", value=""),
-        "sam_model_type": mo.ui.dropdown(options=["vit_h", "vit_l", "vit_b"], value="vit_h", label="SAM model type"),
+        "gdino_model_id": mo.ui.text(label="GroundingDINO model ID", value="IDEA-Research/grounding-dino-base"),
+        "sam_model_id": mo.ui.text(label="SAM model ID", value="facebook/sam-vit-huge"),
         "grounding_text_prompt": mo.ui.text(label="Grounding text prompt", value="rooftop . building roof . roof ."),
         "gdino_box_threshold": mo.ui.slider(0.1, 0.9, value=0.35, step=0.05, label="GroundingDINO box threshold"),
         "gdino_text_threshold": mo.ui.slider(0.1, 0.9, value=0.25, step=0.05, label="GroundingDINO text threshold"),
@@ -1218,12 +1216,12 @@ def _(mo):
     mo.md(r"""
     ### 14.1 Segmentation controls and dependency diagnostics
 
-    **What this section does:** exposes file paths, prompts, thresholds, and attribution-method selection for overlap analysis.
+    **What this section does:** exposes Hugging Face model IDs, prompts, thresholds, and attribution-method selection for overlap analysis.
 
     **How to read it:**
-    - blank GroundingDINO/SAM paths keep model loading disabled
-    - dependency messages below tell you whether optional packages import cleanly
-    - warning panels are non-fatal; attribution notebook can still run without segmentation extras
+    - blank GroundingDINO/SAM model IDs keep model loading disabled
+    - dependency messages below tell you whether `transformers` exposes the required classes
+    - warning panels are non-fatal; attribution notebook can still run without segmentation extras or successful model downloads
     """)
     return
 
@@ -1241,20 +1239,21 @@ def _(DEVICE, grounding_sam, mo, segmentation_controls):
     gdino_model = None
     gdino_warning = None
     try:
-        if not segmentation_controls["gdino_config_path"].value or not segmentation_controls["gdino_weights_path"].value:
-            gdino_warning = "Set GroundingDINO config path and weights path to enable proposal generation."
+        gdino_model_id = segmentation_controls["gdino_model_id"].value.strip()
+        if not gdino_model_id:
+            gdino_warning = "Set a GroundingDINO Hugging Face model ID to enable proposal generation."
         else:
             gdino_model = grounding_sam.load_groundingdino_model(
-                segmentation_controls["gdino_config_path"].value,
-                segmentation_controls["gdino_weights_path"].value,
+                gdino_model_id,
                 device=DEVICE,
             )
-            print("Loaded GroundingDINO model")
+            print(f"Loaded GroundingDINO model from {gdino_model_id}")
     except Exception as exc:
         gdino_warning = str(exc)
         print(f"GroundingDINO load failed: {exc!r}")
+    gdino_status = None
     if gdino_warning:
-        mo.md(f"**GroundingDINO warning:** {gdino_warning}")
+        gdino_status = mo.md(f"**GroundingDINO warning:** {gdino_warning}")
     return gdino_model, gdino_warning
 
 
@@ -1263,20 +1262,21 @@ def _(DEVICE, grounding_sam, mo, segmentation_controls):
     sam_predictor = None
     sam_warning = None
     try:
-        if not segmentation_controls["sam_weights_path"].value:
-            sam_warning = "Set SAM weights path to enable mask refinement."
+        sam_model_id = segmentation_controls["sam_model_id"].value.strip()
+        if not sam_model_id:
+            sam_warning = "Set a SAM Hugging Face model ID to enable mask refinement."
         else:
             sam_predictor = grounding_sam.load_sam_predictor(
-                segmentation_controls["sam_weights_path"].value,
-                model_type=segmentation_controls["sam_model_type"].value,
+                sam_model_id,
                 device=DEVICE,
             )
-            print("Loaded SAM predictor")
+            print(f"Loaded SAM model from {sam_model_id}")
     except Exception as exc:
         sam_warning = str(exc)
         print(f"SAM load failed: {exc!r}")
+    sam_status = None
     if sam_warning:
-        mo.md(f"**SAM warning:** {sam_warning}")
+        sam_status = mo.md(f"**SAM warning:** {sam_warning}")
     return sam_predictor, sam_warning
 
 
@@ -1310,6 +1310,20 @@ def _(mo):
 
 
 @app.cell
+def _(sample_path, segmentation_controls):
+    configured_gdino_model_id = segmentation_controls["gdino_model_id"].value
+    configured_grounding_text_prompt = segmentation_controls["grounding_text_prompt"].value
+    configured_gdino_box_threshold = segmentation_controls["gdino_box_threshold"].value
+    configured_gdino_text_threshold = segmentation_controls["gdino_text_threshold"].value
+    print(f"Selected image: {sample_path.name}")
+    print(f"GroundingDINO config model_id={configured_gdino_model_id!r}")
+    print(f"GroundingDINO config prompt={configured_grounding_text_prompt!r}")
+    print(f"GroundingDINO config box_threshold={configured_gdino_box_threshold}")
+    print(f"GroundingDINO config text_threshold={configured_gdino_text_threshold}")
+    return
+
+
+@app.cell
 def _(
     gdino_model,
     gdino_warning,
@@ -1328,44 +1342,110 @@ def _(
             text_threshold=segmentation_controls["gdino_text_threshold"].value,
         )
         print(f"Selected image: {sample_path.name}")
+        print(f"GroundingDINO model ID: {segmentation_controls['gdino_model_id'].value}")
         print(f"GroundingDINO boxes: {len(grounding_prediction.boxes_xyxy)}")
         print(f"Prompt: {segmentation_controls['grounding_text_prompt'].value}")
+    else:
+        print("Skipping GroundingDINO inference because model loading is disabled or failed.")
     return (grounding_prediction,)
 
 
-app._unparsable_cell(
-    r"""
-    if grounding_prediction is None or len(grounding_prediction.boxes_xyxy) == 0:
-        return (mo.md("**No GroundingDINO boxes detected for current image.**"),)
-
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.imshow(pil_img)
-    for idx, (box, conf) in enumerate(zip(grounding_prediction.boxes_xyxy, grounding_prediction.confidences)):
-        x0, y0, x1, y1 = box
-        rect = plt.Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, edgecolor="cyan", linewidth=2)
-        ax.add_patch(rect)
-        ax.text(x0, y0, f"{idx}: {conf:.3f}", color="white", bbox={"facecolor": "black", "alpha": 0.6})
-    ax.axis("off")
-    ax.set_title("GroundingDINO rooftop proposals")
-    plt.close(fig)
-    """,
-    name="_"
-)
+@app.cell
+def _(grounding_prediction, mo, pil_img, plt):
+    output = None
+    if grounding_prediction is None:
+        output = mo.md("**GroundingDINO proposals unavailable until model loading succeeds.**")
+    elif len(grounding_prediction.boxes_xyxy) == 0:
+        width, height = pil_img.size
+        print(f"GroundingDINO boxes: 0")
+        print(f"Using full-image fallback box for SAM.")
+        print(f"Fallback box: [0, 0, {width}, {height}]")
+        output = mo.md("**No GroundingDINO boxes detected for current image. Will fall back to full-image SAM.**")
+    else:
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.imshow(pil_img)
+        for proposal_idx, (box, conf) in enumerate(zip(grounding_prediction.boxes_xyxy, grounding_prediction.confidences)):
+            x0, y0, x1, y1 = box
+            rect = plt.Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, edgecolor="cyan", linewidth=2)
+            ax.add_patch(rect)
+            ax.text(x0, y0, f"{proposal_idx}: {conf:.3f}", color="white", bbox={"facecolor": "black", "alpha": 0.6})
+        ax.axis("off")
+        ax.set_title("GroundingDINO rooftop proposals")
+        plt.close(fig)
+        output = fig
+    return
 
 
 @app.cell
 def _(
     grounding_prediction,
     grounding_sam,
+    mo,
+    np,
     pil_img,
+    plt,
     sam_predictor,
     sam_warning,
+    segmentation_controls,
 ):
     sam_prediction = None
-    if grounding_prediction is not None and len(grounding_prediction.boxes_xyxy) > 0 and sam_predictor is not None and not sam_warning:
-        sam_prediction = grounding_sam.run_sam_box_refinement(sam_predictor, pil_img, grounding_prediction.boxes_xyxy)
-        print(f"SAM masks: {len(sam_prediction.masks)}")
-        print(f"SAM mask areas: {[int(mask.sum()) for mask in sam_prediction.masks]}")
+    sam_overlay_output = None
+    sam_overlay_warning = sam_warning
+    gate_reason = None
+    fallback_active = False
+    boxes_for_sam = None
+    if grounding_prediction is None:
+        gate_reason = "GroundingDINO prediction unavailable."
+    elif len(grounding_prediction.boxes_xyxy) == 0:
+        width, height = pil_img.size
+        fallback_active = True
+        boxes_for_sam = [[0.0, 0.0, float(width), float(height)]]
+        print(f"GroundingDINO boxes: 0 \u2014 using full-image fallback box for SAM.")
+        print(f"Fallback box: [0, 0, {width}, {height}]")
+    elif sam_predictor is None:
+        gate_reason = "SAM predictor not loaded."
+    elif sam_warning:
+        gate_reason = f"SAM loader warning present: {sam_warning}"
+
+    if gate_reason is None:
+        try:
+            effective_boxes = boxes_for_sam if fallback_active else grounding_prediction.boxes_xyxy
+            sam_prediction = grounding_sam.run_sam_box_refinement(sam_predictor, pil_img, effective_boxes)
+            print(f"SAM model ID: {segmentation_controls['sam_model_id'].value}")
+            print(f"SAM masks: {len(sam_prediction.masks)}")
+            print(f"SAM mask areas: {[int(mask.sum()) for mask in sam_prediction.masks]}")
+        except Exception as exc:
+            sam_overlay_warning = f"SAM refinement failed: {exc}"
+            print(sam_overlay_warning)
+    else:
+        print(f"Skipping SAM mask refinement: {gate_reason}")
+    if sam_prediction is None:
+        if sam_overlay_warning:
+            sam_overlay_output = mo.md(f"**SAM overlay unavailable:** {sam_overlay_warning}")
+        else:
+            sam_overlay_output = mo.md("**SAM overlay unavailable.**")
+    else:
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ax.imshow(pil_img)
+        sam_cmap = plt.get_cmap("spring")
+        if fallback_active:
+            x0, y0, x1, y1 = boxes_for_sam[0]
+            rect = plt.Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, edgecolor="cyan", linewidth=2, linestyle="--")
+            ax.add_patch(rect)
+            ax.text(x0, y0, "fallback", color="white", bbox={"facecolor": "black", "alpha": 0.6})
+        else:
+            for proposal_idx, (box, conf) in enumerate(zip(grounding_prediction.boxes_xyxy, grounding_prediction.confidences)):
+                x0, y0, x1, y1 = box
+                rect = plt.Rectangle((x0, y0), x1 - x0, y1 - y0, fill=False, edgecolor="cyan", linewidth=2)
+                ax.add_patch(rect)
+                ax.text(x0, y0, f"{proposal_idx}: {conf:.3f}", color="white", bbox={"facecolor": "black", "alpha": 0.6})
+        for mask_idx, mask in enumerate(sam_prediction.masks):
+            masked_overlay = np.ma.masked_where(~mask, mask)
+            ax.imshow(masked_overlay, cmap=sam_cmap, alpha=0.28 + 0.08 * (mask_idx % 3))
+        ax.axis("off")
+        ax.set_title("Full-image fallback box + SAM mask" if fallback_active else "GroundingDINO proposals + SAM masks")
+        plt.close(fig)
+        sam_overlay_output = fig
     return (sam_prediction,)
 
 
@@ -1451,20 +1531,21 @@ def _(
         print(f"Resized attribution shape: {resized_map.shape}")
         print(f"Threshold value: {threshold_value:.6f}")
         print(f"Attribution density: {attribution_density:.6f}")
+    else:
+        print("Skipping overlap analysis because no SAM masks are available.")
     return (attribution_analysis,)
 
 
-app._unparsable_cell(
-    r"""
+@app.cell
+def _(attribution_analysis, mo, pd):
+    output = None
     if attribution_analysis is None:
-        return (mo.md("**IoU analysis unavailable until SAM masks are generated.**"),)
-
-    metrics_df = pd.DataFrame(
-        attribution_analysis["instance_rows"] + [attribution_analysis["combined_row"]]
-    )
-    """,
-    name="_"
-)
+        output = mo.md("**IoU analysis unavailable until SAM masks are generated.**")
+    else:
+        output = pd.DataFrame(
+            attribution_analysis["instance_rows"] + [attribution_analysis["combined_row"]]
+        )
+    return
 
 
 @app.cell
@@ -1494,7 +1575,9 @@ def _(attribution_analysis, segmentation_controls, segmentation_iou):
             "random_iou_z": random_iou_z,
         }
         print(f"Baseline summary: {baseline_summary}")
-    return
+    else:
+        print("Skipping threshold sweep and random baseline because overlap analysis is unavailable.")
+    return baseline_summary, threshold_rows
 
 
 @app.cell(hide_code=True)
@@ -1512,63 +1595,63 @@ def _(mo):
     return
 
 
-app._unparsable_cell(
-    r"""
+@app.cell
+def _(attribution_analysis, baseline_summary, mo, np, pil_img, plt):
+    output = None
     if attribution_analysis is None:
-        return (mo.md("**Binary attribution and SAM overlay unavailable.**"),)
+        output = mo.md("**Binary attribution and SAM overlay unavailable.**")
+    else:
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        axes[0].imshow(pil_img)
+        axes[0].set_title("Input image")
+        axes[1].imshow(attribution_analysis["binary_mask"], cmap="gray")
+        axes[1].set_title("Binary attribution mask")
+        axes[2].imshow(pil_img)
+        combined_mask = np.ma.masked_where(
+            ~attribution_analysis["combined_mask"], attribution_analysis["combined_mask"]
+        )
+        axes[2].imshow(combined_mask, cmap="spring", alpha=0.45)
+        overlay_title = "SAM overlap"
+        if baseline_summary is not None:
+            overlay_title = f"SAM overlap | IoU={baseline_summary['actual_iou']:.3f}"
+        axes[2].set_title(overlay_title)
+        for ax in axes:
+            ax.axis("off")
+        fig.tight_layout()
+        plt.close(fig)
+        output = fig
+    return
 
-    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-    axes[0].imshow(pil_img)
-    axes[0].set_title("Input image")
-    axes[1].imshow(attribution_analysis["binary_mask"], cmap="gray")
-    axes[1].set_title("Binary attribution mask")
-    axes[2].imshow(pil_img)
-    combined_mask = np.ma.masked_where(
-        ~attribution_analysis["combined_mask"], attribution_analysis["combined_mask"]
-    )
-    axes[2].imshow(combined_mask, cmap="spring", alpha=0.45)
-    overlay_title = "SAM overlap"
-    if baseline_summary is not None:
-        overlay_title = f"SAM overlap | IoU={baseline_summary['actual_iou']:.3f}"
-    axes[2].set_title(overlay_title)
-    for ax in axes:
-        ax.axis("off")
-    fig.tight_layout()
-    plt.close(fig)
-    """,
-    name="_"
-)
 
-
-app._unparsable_cell(
-    r"""
+@app.cell
+def _(baseline_summary, mo, pd):
+    output = None
     if baseline_summary is None:
-        return (mo.md("**Random baseline unavailable until overlap analysis runs.**"),)
-
-    baseline_df = pd.DataFrame([baseline_summary])
-    """,
-    name="_"
-)
+        output = mo.md("**Random baseline unavailable until overlap analysis runs.**")
+    else:
+        output = pd.DataFrame([baseline_summary])
+    return
 
 
-app._unparsable_cell(
-    r"""
+@app.cell
+def _(mo, pd, plt, threshold_rows):
+    threshold_df = None
+    output = None
     if not threshold_rows:
-        return (mo.md("**Threshold sensitivity unavailable until overlap analysis runs.**"),)
-
-    threshold_df = pd.DataFrame(threshold_rows)
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(threshold_df["percentile"], threshold_df["combined_iou"], label="combined IoU")
-    ax.plot(threshold_df["percentile"], threshold_df["mean_instance_iou"], label="mean instance IoU")
-    ax.set_xlabel("Attribution percentile")
-    ax.set_ylabel("IoU")
-    ax.set_title("Threshold sensitivity")
-    ax.legend()
-    fig.tight_layout()
-    plt.close(fig)
-    """,
-    name="_"
-)
+        output = mo.md("**Threshold sensitivity unavailable until overlap analysis runs.**")
+    else:
+        threshold_df = pd.DataFrame(threshold_rows)
+        fig, ax = plt.subplots(figsize=(7, 4))
+        ax.plot(threshold_df["percentile"], threshold_df["combined_iou"], label="combined IoU")
+        ax.plot(threshold_df["percentile"], threshold_df["mean_instance_iou"], label="mean instance IoU")
+        ax.set_xlabel("Attribution percentile")
+        ax.set_ylabel("IoU")
+        ax.set_title("Threshold sensitivity")
+        ax.legend()
+        fig.tight_layout()
+        plt.close(fig)
+        output = fig
+    return
 
 
 @app.cell(hide_code=True)
