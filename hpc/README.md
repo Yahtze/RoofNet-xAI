@@ -208,7 +208,24 @@ overlays/*__segmentation_overlay.png
 logs/*.log
 ```
 
-## 11. Resume or recompute
+## 11. Generate attribution overlays (curated subsets)
+
+After running the segmentation batch and curating top images, generate attribution heatmap overlays:
+
+```bash
+sbatch hpc/run_attribution_overlays.sbatch
+```
+
+This runs Transformer Explainability on `curated_top100` and `curated_top66` images and saves blended heatmap overlays to:
+
+```text
+xAI_outputs/segmentation/curated_top100/attribution_overlays/
+xAI_outputs/segmentation/curated_top66/attribution_overlays/
+```
+
+Skips already-generated images. Takes ~5-10 min on a single GPU.
+
+## 12. Resume or recompute
 
 Resume is automatic. Rerun same job/script; completed images are skipped when CSV row + mask + overlay exist.
 
@@ -227,7 +244,7 @@ python xAI_notebooks/remoteclip_segmentation_overlap_batch.py \
   --log-level INFO
 ```
 
-## 12. Cleanup environment/cache
+## 13. Cleanup environment/cache
 
 Prompt before delete:
 
