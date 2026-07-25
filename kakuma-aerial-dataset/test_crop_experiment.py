@@ -123,6 +123,7 @@ class WriterTests(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 from prepare_alpha_crops import prepare_dataset
+from prepare_full_tiff_jpegs import prepare_dataset as prepare_full_tiff_dataset
 
 
 class PreparationTests(unittest.TestCase):
@@ -149,11 +150,49 @@ class PreparationTests(unittest.TestCase):
             self.assertTrue((output / "contact_sheet.jpg").exists())
 
 
+class FullTiffPreparationTests(unittest.TestCase):
+    def test_prepare_dataset_exports_full_rgb_tiffs_by_class(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "source"
+            for label, color in (
+                ("metal_sheet", [21, 42, 63]),
+                ("thatch", [84, 105, 126]),
+            ):
+                folder = root / label
+                folder.mkdir(parents=True)
+                rgba = np.zeros((20, 40, 4), dtype=np.uint8)
+                rgba[..., :3] = color
+                rgba[5:12, 6:13, 3] = 1
+                Image.fromarray(rgba, "RGBA").save(folder / "same_name.tif")
+
+            output = Path(tmp) / "full-tiff-jpegs"
+            summary = prepare_full_tiff_dataset(
+                root, output, reset=True, contact_sheet_size=4
+            )
+
+            self.assertEqual(summary.prepared, 2)
+            metal_images = list((output / "images" / "metal_sheet").glob("*.jpg"))
+            thatch_images = list((output / "images" / "thatch").glob("*.jpg"))
+            self.assertEqual(len(metal_images), 1)
+            self.assertEqual(len(thatch_images), 1)
+            with Image.open(metal_images[0]) as result:
+                self.assertEqual(result.format, "JPEG")
+                self.assertEqual(result.mode, "RGB")
+                self.assertEqual(result.size, (40, 20))
+                self.assertTrue(
+                    np.allclose(result.getpixel((20, 10)), (21, 42, 63), atol=2)
+                )
+            self.assertTrue((output / "manifest.csv").exists())
+            self.assertTrue((output / "preparation_metadata.json").exists())
+            self.assertTrue((output / "contact_sheet.jpg").exists())
+
+
 # ---------------------------------------------------------------------------
 # Task 4: Result store and resume tests
 # ---------------------------------------------------------------------------
 
 from infer_prepared_crops import (
+    GT_TO_TRAINING,
     ResultStore,
     ensure_complete_for_evaluation,
     run_inference,
@@ -162,6 +201,9 @@ from infer_prepared_crops import (
 
 
 class ResumeTests(unittest.TestCase):
+    def test_plastic_ground_truth_is_evaluated_as_amorphous_fabric(self):
+        self.assertEqual(GT_TO_TRAINING["plastic"], "AmorphousFabric")
+
     def test_resume_keys_results_by_sample_id_not_basename(self):
         with TemporaryDirectory() as tmp:
             store = ResultStore(Path(tmp) / "results.csv")

@@ -62,7 +62,7 @@ MATERIAL_PROMPTS = list(MATERIAL_DESCRIPTIONS.values())
 GT_TO_TRAINING = {
     "metal_sheet": "MetalSheetMaterials",
     "thatch": "Thatch",
-    "plastic": "PolycarbonateSheetMaterials",
+    "plastic": "AmorphousFabric",
     "other": "Unknown",
 }
 

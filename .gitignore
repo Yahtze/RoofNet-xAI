@@ -29,3 +29,4 @@ scratchpad/
 # === Prepared/inference experiment assets ===
 kakuma-aerial-dataset/prepared_*/
 kakuma-aerial-dataset/inference_*/
+full-tiff-jpegs/
