@@ -25,3 +25,7 @@ tests/
 xAI_outputs/batch_run_manifest.json
 
 scratchpad/
+
+# === Prepared/inference experiment assets ===
+kakuma-aerial-dataset/prepared_*/
+kakuma-aerial-dataset/inference_*/

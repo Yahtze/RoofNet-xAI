@@ -17,10 +17,10 @@ import torch
 import shutil
 import argparse
 import pandas as pd
-from torchvision import transforms
 from PIL import Image
 from pathlib import Path
-import open_clip
+
+from remoteclip_runtime import load_finetuned_remoteclip
 
 # List of target material categories (labels) for classification
 MATERIAL_CLASSES = [
@@ -99,21 +99,11 @@ def main(classification_dir, results_dir, model_weights_path, metadata_csv):
         df['material_class'] = None
     df['material_class'] = df['material_class'].astype(object)
 
-    # Initialize model
+    # Initialize model using shared runtime (no LAION pretrained weights)
     print("Loading RemoteCLIP model...")
-    model, _, _ = open_clip.create_model_and_transforms('ViT-L-14', pretrained='laion2b_s32b_b82k')
-    
-    preprocess = transforms.Compose([
-        transforms.Resize((224, 224)),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
-                             std=[0.26862954, 0.26130258, 0.27577711])
-    ])
-    tokenizer = open_clip.get_tokenizer('ViT-L-14')
-
-    model.load_state_dict(torch.load(model_weights_path, map_location=device))
-    model.to(device)
-    model.eval()
+    model, tokenizer, preprocess = load_finetuned_remoteclip(
+        Path(model_weights_path), device
+    )
 
     # Create subdirectories for every material class
     for material in MATERIAL_CLASSES:

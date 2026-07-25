@@ -495,13 +495,18 @@ def _(mo):
 
 
 @app.cell
-def _(CONFIG, DEVICE, Path, assets, open_clip, torch):
+def _(REPO_ROOT):
+    import sys as _sys
+    if str(REPO_ROOT / "training_evaluation") not in _sys.path:
+        _sys.path.insert(0, str(REPO_ROOT / "training_evaluation"))
+    from remoteclip_runtime import load_finetuned_remoteclip
+    return (load_finetuned_remoteclip,)
+
+
+@app.cell
+def _(CONFIG, DEVICE, Path, assets, load_finetuned_remoteclip, torch):
     def load_remoteclip_model(weights_path: Path, device: str = DEVICE):
-        model, _, _ = open_clip.create_model_and_transforms(CONFIG.model_name, pretrained=CONFIG.pretrained_weights)
-        state = torch.load(weights_path, map_location=device)
-        model.load_state_dict(state)
-        model.to(device).eval()
-        tokenizer = open_clip.get_tokenizer(CONFIG.model_name)
+        model, tokenizer, _preprocess = load_finetuned_remoteclip(weights_path, device)
         return model, tokenizer
 
     model, tokenizer = load_remoteclip_model(assets.model_weights)

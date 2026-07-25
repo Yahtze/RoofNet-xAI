@@ -215,11 +215,10 @@ def resolve_assets(args: argparse.Namespace) -> AssetPaths:
 # ---------------------------------------------------------------------------
 
 def load_remoteclip(weights_path: Path, device: str):
-    model, _, _ = open_clip.create_model_and_transforms(MODEL_NAME, pretrained=PRETRAINED_WEIGHTS)
-    state = torch.load(weights_path, map_location=device, weights_only=True)
-    model.load_state_dict(state)
-    model.to(device).eval()
-    tokenizer = open_clip.get_tokenizer(MODEL_NAME)
+    # Use shared runtime — no LAION pretrained weights
+    sys.path.insert(0, str(REPO_ROOT / "training_evaluation"))
+    from remoteclip_runtime import load_finetuned_remoteclip
+    model, tokenizer, _preprocess = load_finetuned_remoteclip(weights_path, device)
     return model, tokenizer
 
 
