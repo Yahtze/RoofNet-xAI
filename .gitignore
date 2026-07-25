@@ -4,6 +4,7 @@ croissant_rai_RoofNet-Kaggle.json
 roofnet_metadata.csv
 xBD_cropped_roofs/
 RoofNet-Images/
+chipped_roof_material_classification/
 
 # === Local cache/runtime artifacts ===
 __pycache__/
