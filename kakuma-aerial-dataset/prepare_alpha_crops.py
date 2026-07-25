@@ -2,11 +2,11 @@
 """
 prepare_alpha_crops.py
 =====================
-CLI that turns RGBA TIFF source images into a flat directory of padded RGB
-JPEGs suitable for RemoteCLIP inference.
+CLI that turns RGBA TIFF source images into class-organized RGB JPEGs suitable
+for RemoteCLIP inference.
 
 Reads only source TIFFs. Produces:
-- One flat JPEG directory with collision-safe filenames
+- One JPEG directory per ground-truth class with collision-safe filenames
 - A minimal CSV manifest
 - A preparation_metadata.json provenance file
 - A visual contact sheet for QA review
@@ -32,7 +32,6 @@ from crop_experiment import (
     MANIFEST_COLUMNS,
     crop_from_alpha,
     make_sample_id,
-    square_pad_rgb,
     write_manifest,
     write_prepared_jpeg,
 )
@@ -245,19 +244,18 @@ def prepare_dataset(
             # Crop from alpha
             cropped = crop_from_alpha(rgba, padding=PADDING)
 
-            # Square pad
-            padded = square_pad_rgb(cropped)
-
-            # Write JPEG
+            # Keep the clipped alpha crop at its native dimensions. Pixels
+            # outside a source-image boundary are not synthesized.
+            class_images_dir = images_dir / gt_class
             prepared_filename = write_prepared_jpeg(
-                padded, images_dir, sample_id, quality=JPEG_QUALITY
+                cropped, class_images_dir, sample_id, quality=JPEG_QUALITY
             )
 
             manifest_rows.append(
                 {
                     "sample_id": sample_id,
                     "source_relpath": source_relpath,
-                    "prepared_filename": prepared_filename.name,
+                    "prepared_filename": prepared_filename.relative_to(images_dir).as_posix(),
                     "gt_class": gt_class,
                     "status": "prepared",
                     "error": "",

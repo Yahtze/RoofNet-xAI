@@ -27,6 +27,11 @@ import pandas as pd
 import torch
 from PIL import Image
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+TRAINING_EVALUATION_DIR = REPO_ROOT / "training_evaluation"
+if str(TRAINING_EVALUATION_DIR) not in sys.path:
+    sys.path.insert(0, str(TRAINING_EVALUATION_DIR))
+
 from crop_experiment import MANIFEST_COLUMNS
 
 # ---------------------------------------------------------------------------
@@ -77,26 +82,63 @@ RESULTS_COLUMNS = [
 RESULTS_SCHEMA_VERSION = "1.0"
 
 
+class IncompleteInferenceError(RuntimeError):
+    """Raised after partial results have been persisted but are incomplete."""
+
+
 # ---------------------------------------------------------------------------
 # Input validation
 # ---------------------------------------------------------------------------
 
 
-def validate_input_manifest(rows: list[dict]) -> None:
+def validate_input_manifest(
+    rows: list[dict],
+    images_dir: Path | None = None,
+    *,
+    allow_failed: bool = False,
+) -> None:
     """Validate the preparation manifest for duplicate IDs and other issues."""
     seen = set()
     for row in rows:
         sid = row.get("sample_id", "")
+        if not isinstance(sid, str) or not sid:
+            raise ValueError("missing sample_id")
         if sid in seen:
             raise ValueError(f"duplicate sample_id: {sid}")
         seen.add(sid)
+        gt_class = row.get("gt_class")
+        if gt_class not in GT_TO_TRAINING:
+            raise ValueError(f"unsupported gt_class: {gt_class}")
+        status = row.get("status")
+        if status not in {"prepared", "failed"}:
+            raise ValueError(f"unsupported preparation status: {status}")
+        if status == "failed":
+            if not allow_failed:
+                raise ValueError("failed preparation rows require --allow-failed")
+            continue
+        filename = row.get("prepared_filename")
+        if not isinstance(filename, str) or not filename:
+            raise ValueError(f"missing prepared_filename for {sid}")
+        filename_path = Path(filename)
+        if (
+            filename_path.is_absolute()
+            or filename_path.parts != (gt_class, filename_path.name)
+            or filename_path.name in {"", ".", ".."}
+        ):
+            raise ValueError(f"path traversal in prepared_filename: {filename}")
+        if images_dir is not None:
+            image_path = images_dir / filename_path
+            if not image_path.is_file():
+                raise ValueError(f"missing prepared image: {image_path}")
 
 
-def load_prepared_manifest(manifest_path: Path) -> list[dict]:
+def load_prepared_manifest(
+    manifest_path: Path, images_dir: Path | None = None, *, allow_failed: bool = False
+) -> list[dict]:
     """Load and validate the preparation manifest CSV."""
     df = pd.read_csv(manifest_path)
     rows = df.to_dict("records")
-    validate_input_manifest(rows)
+    validate_input_manifest(rows, images_dir, allow_failed=allow_failed)
     return rows
 
 
@@ -126,6 +168,7 @@ class ResultStore:
         if self.csv_path.exists():
             df = pd.read_csv(self.csv_path)
             self._rows = df.to_dict("records")
+            validate_result_rows(self._rows)
         if self.metadata_path.exists():
             with open(self.metadata_path, "r", encoding="utf-8") as f:
                 self._metadata = json.load(f)
@@ -201,6 +244,7 @@ def ensure_complete_for_evaluation(
 
     Raises ValueError with count of missing/failed rows.
     """
+    validate_result_rows(result_rows)
     input_ids = {r["sample_id"] for r in input_rows}
     result_by_id: dict[str, dict] = {}
     for r in result_rows:
@@ -221,6 +265,18 @@ def ensure_complete_for_evaluation(
             f"Incomplete results: {', '.join(parts)}. "
             f"Re-run inference or use --allow-failed for partial evaluation."
         )
+
+
+def validate_result_rows(rows: list[dict]) -> None:
+    """Reject result tables whose resume key is not unique."""
+    seen = set()
+    for row in rows:
+        sid = row.get("sample_id")
+        if not isinstance(sid, str) or not sid:
+            raise ValueError("missing result sample_id")
+        if sid in seen:
+            raise ValueError(f"duplicate sample_id in results: {sid}")
+        seen.add(sid)
 
 
 def compute_evaluation(
@@ -387,7 +443,11 @@ def run_inference(
         print(f"Error: preparation metadata not found at {metadata_path}")
         sys.exit(1)
 
-    input_rows = load_prepared_manifest(manifest_path)
+    input_rows = load_prepared_manifest(
+        manifest_path,
+        prepared_dir / "images",
+        allow_failed=allow_failed,
+    )
     prep_metadata = load_preparation_metadata(metadata_path)
 
     print(f"Loaded {len(input_rows)} entries from preparation manifest")
@@ -461,13 +521,13 @@ def run_inference(
         compute_evaluation(input_rows, result_rows, output_dir)
         return
 
-    # Load model
-    print("Loading RemoteCLIP model...")
-    model, tokenizer, preprocess_val = load_finetuned_remoteclip(weights_path, device)
-    print("Model loaded.")
-
-    # Tokenize prompts once
-    tokenized_prompts = tokenizer(MATERIAL_PROMPTS).to(device)
+    pending_prepared = [row for row in pending if row.get("status") == "prepared"]
+    model = tokenizer = preprocess_val = tokenized_prompts = None
+    if pending_prepared:
+        print("Loading RemoteCLIP model...")
+        model, tokenizer, preprocess_val = load_finetuned_remoteclip(weights_path, device)
+        print("Model loaded.")
+        tokenized_prompts = tokenizer(MATERIAL_PROMPTS).to(device)
 
     # Process pending
     for i, row in enumerate(pending):
@@ -580,11 +640,9 @@ def run_inference(
 
     try:
         ensure_complete_for_evaluation(input_rows, result_rows)
-        compute_evaluation(input_rows, result_rows, output_dir)
-    except ValueError as e:
-        print(f"Skipping evaluation: {e}")
-        if allow_failed:
-            print("Partial results saved. Re-run without --allow-failed for full evaluation.")
+    except ValueError as exc:
+        raise IncompleteInferenceError(f"incomplete inference: {exc}") from exc
+    compute_evaluation(input_rows, result_rows, output_dir)
 
 
 # ---------------------------------------------------------------------------
@@ -633,14 +691,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    run_inference(
-        prepared_dir=Path(args.prepared_dir),
-        weights_path=Path(args.weights),
-        output_dir=Path(args.output_dir),
-        reset=args.reset,
-        allow_failed=args.allow_failed,
-        device=args.device,
-    )
+    try:
+        run_inference(
+            prepared_dir=Path(args.prepared_dir),
+            weights_path=Path(args.weights),
+            output_dir=Path(args.output_dir),
+            reset=args.reset,
+            allow_failed=args.allow_failed,
+            device=args.device,
+        )
+    except IncompleteInferenceError as exc:
+        print(f"Partial results saved: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
 
 
 if __name__ == "__main__":

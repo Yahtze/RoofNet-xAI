@@ -15,6 +15,7 @@ Provides:
 from __future__ import annotations
 
 import hashlib
+from io import BytesIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -117,21 +118,18 @@ def write_prepared_jpeg(
     filename = f"{sample_id}.jpg"
     output_path = output_dir / filename
 
+    encoded = BytesIO()
+    image.convert("RGB").save(encoded, "JPEG", quality=quality)
+    requested_bytes = encoded.getvalue()
+
     if output_path.exists():
-        # Check if existing file matches by re-encoding and comparing
-        existing = Image.open(output_path).convert("RGB")
-        if existing.size == image.size and existing.mode == "RGB":
-            # Compare pixel data
-            existing_arr = np.asarray(existing)
-            new_arr = np.asarray(image.convert("RGB"))
-            if np.array_equal(existing_arr, new_arr):
-                return output_path
+        if output_path.read_bytes() == requested_bytes:
+            return output_path
         raise FileExistsError(
             f"Refusing to overwrite {output_path}: existing image bytes differ"
         )
 
-    rgb_image = image.convert("RGB")
-    rgb_image.save(str(output_path), "JPEG", quality=quality)
+    output_path.write_bytes(requested_bytes)
     return output_path
 
 
